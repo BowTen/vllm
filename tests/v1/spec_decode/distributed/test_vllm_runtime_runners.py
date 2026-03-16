@@ -56,6 +56,7 @@ class FakeRuntime:
         self._responses = deque(responses)
         self.open_calls: list[tuple[str, list[int], SamplingMetadata, int | None]] = []
         self.run_calls: list[tuple[str, list[int], int, int | None]] = []
+        self.batch_calls: list[list[tuple[str, list[int], int, int | None]]] = []
         self.closed: list[str] = []
         self.shutdown_called = False
 
@@ -85,6 +86,25 @@ class FakeRuntime:
         del sampling, prompt_logprobs
         self.run_calls.append((session_id, list(prefix_token_ids), max_tokens, logprobs))
         return self._responses.popleft()
+
+    async def run_queries(
+        self,
+        queries: list[runtime_mod.EngineQuery],
+    ) -> list[runtime_mod.EngineChunkResult]:
+        batch: list[tuple[str, list[int], int, int | None]] = []
+        outputs: list[runtime_mod.EngineChunkResult] = []
+        for query in queries:
+            record = (
+                query.session_id,
+                list(query.prefix_token_ids),
+                query.max_tokens,
+                query.logprobs,
+            )
+            self.run_calls.append(record)
+            batch.append(record)
+            outputs.append(self._responses.popleft())
+        self.batch_calls.append(batch)
+        return outputs
 
     async def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
@@ -259,6 +279,109 @@ async def test_vllm_target_runner_returns_bonus_token(
     assert result.verifier_version == 3
     assert len(result.accepted_logprobs) == 2
     assert result.bonus_logprobs is not None
+
+
+@pytest.mark.asyncio
+async def test_vllm_target_runner_batches_verification_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_runtime = FakeRuntime(
+        [
+            runtime_mod.EngineChunkResult(
+                token_ids=[1],
+                logprobs=[_packed([0.0, 1.0, 0.0, 0.0], 1)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+            runtime_mod.EngineChunkResult(
+                token_ids=[3],
+                logprobs=[_packed([0.0, 0.0, 0.0, 1.0], 3)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+            runtime_mod.EngineChunkResult(
+                token_ids=[2],
+                logprobs=[_packed([0.0, 0.0, 1.0, 0.0], 2)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        runtime_mod,
+        "build_target_runtime_config",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(runtime_mod, "VllmEngineSessionRuntime", lambda _cfg: fake_runtime)
+    monkeypatch.setattr(
+        runtime_mod,
+        "StructuredOutputFactory",
+        _fake_structured_output_factory,
+    )
+
+    runner = runtime_mod.VllmTargetVerificationRunner(
+        model_name="fake-model",
+        device=None,
+        dtype="auto",
+        trust_remote_code=False,
+    )
+    await runner.open_session(
+        OpenSessionRequest(
+            session_id="session-a",
+            prompt_token_ids=[9],
+            sampling_metadata=_sampling(logprobs=1),
+            initial_version=0,
+        )
+    )
+    await runner.open_session(
+        OpenSessionRequest(
+            session_id="session-b",
+            prompt_token_ids=[8],
+            sampling_metadata=_sampling(logprobs=1),
+            initial_version=0,
+        )
+    )
+
+    results = await runner.verify_proposals_batch(
+        [
+            DraftProposal(
+                session_id="session-a",
+                proposal_id=0,
+                base_version=0,
+                accepted_prefix_len=1,
+                draft_token_ids=[1],
+                draft_token_probs=[1.0],
+                draft_stopped=False,
+            ),
+            DraftProposal(
+                session_id="session-b",
+                proposal_id=1,
+                base_version=0,
+                accepted_prefix_len=1,
+                draft_token_ids=[2],
+                draft_token_probs=[1.0],
+                draft_stopped=True,
+            ),
+        ]
+    )
+
+    assert [result.accepted_token_ids for result in results] == [[1], []]
+    assert results[0].bonus_token_id == 2
+    assert results[1].reject_pos == 0
+    assert fake_runtime.batch_calls == [
+        [
+            ("session-a", [9], 1, -1),
+            ("session-b", [8], 1, -1),
+        ],
+        [
+            ("session-a", [9, 1], 1, -1),
+        ],
+    ]
+    assert runner._sessions["session-a"].version == 2
+    assert runner._sessions["session-b"].version == 0
 
 
 def test_single_worker_runtime_config_disables_async_scheduling(

@@ -7,7 +7,7 @@ import asyncio
 import copy
 import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -202,6 +202,27 @@ class EngineChunkResult:
 
 
 @dataclass
+class EngineQuery:
+    session_id: str
+    prefix_token_ids: list[int]
+    sampling: SamplingMetadata
+    max_tokens: int
+    logprobs: int | None = None
+    prompt_logprobs: int | None = None
+
+
+@dataclass
+class _PendingEngineQuery:
+    request_id: str
+    prefix_token_ids: list[int]
+    token_ids: list[int] = field(default_factory=list)
+    logprobs: list[PackedLogprobs] = field(default_factory=list)
+    prompt_logprobs: list[PackedLogprobs] = field(default_factory=list)
+    finish_reason: FinishReason | None = None
+    stop_reason: int | str | None = None
+
+
+@dataclass
 class RuntimeSessionRecord:
     session_id: str
     next_request_index: int = 0
@@ -330,6 +351,15 @@ class VllmEngineSessionRuntime:
                 prompt_logprobs,
             )
 
+    async def run_queries(
+        self,
+        queries: list[EngineQuery],
+    ) -> list[EngineChunkResult]:
+        if not queries:
+            return []
+        async with self._lock:
+            return await asyncio.to_thread(self._run_queries_sync, queries)
+
     async def close_session(self, session_id: str) -> None:
         async with self._lock:
             await asyncio.to_thread(self._close_session_sync, session_id)
@@ -373,65 +403,92 @@ class VllmEngineSessionRuntime:
         logprobs: int | None,
         prompt_logprobs: int | None,
     ) -> EngineChunkResult:
-        if max_tokens <= 0:
-            raise ValueError("max_tokens must be positive when running a chunk.")
-        record = self._sessions.setdefault(
-            session_id,
-            RuntimeSessionRecord(session_id=session_id),
-        )
-        request_id = f"{session_id}:{record.next_request_index}"
-        record.next_request_index += 1
-        self._engine.add_request(
-            _engine_request(
-                request_id,
-                prefix_token_ids,
-                sampling,
-                max_tokens=max_tokens,
-                logprobs=logprobs,
-                prompt_logprobs=prompt_logprobs,
+        return self._run_queries_sync(
+            [
+                EngineQuery(
+                    session_id=session_id,
+                    prefix_token_ids=prefix_token_ids,
+                    sampling=sampling,
+                    max_tokens=max_tokens,
+                    logprobs=logprobs,
+                    prompt_logprobs=prompt_logprobs,
+                )
+            ]
+        )[0]
+
+    def _run_queries_sync(
+        self,
+        queries: list[EngineQuery],
+    ) -> list[EngineChunkResult]:
+        pending: dict[str, _PendingEngineQuery] = {}
+        ordered_request_ids: list[str] = []
+
+        for query in queries:
+            if query.max_tokens <= 0:
+                raise ValueError(
+                    "max_tokens must be positive when running engine queries."
+                )
+            record = self._sessions.setdefault(
+                query.session_id,
+                RuntimeSessionRecord(session_id=query.session_id),
             )
-        )
+            request_id = f"{query.session_id}:{record.next_request_index}"
+            record.next_request_index += 1
+            self._engine.add_request(
+                _engine_request(
+                    request_id,
+                    query.prefix_token_ids,
+                    query.sampling,
+                    max_tokens=query.max_tokens,
+                    logprobs=query.logprobs,
+                    prompt_logprobs=query.prompt_logprobs,
+                )
+            )
+            ordered_request_ids.append(request_id)
+            pending[request_id] = _PendingEngineQuery(
+                request_id=request_id,
+                prefix_token_ids=list(query.prefix_token_ids),
+            )
 
-        token_ids: list[int] = []
-        packed_logprobs: list[PackedLogprobs] = []
-        packed_prompt_logprobs: list[PackedLogprobs] = []
-        finish_reason = None
-        stop_reason = None
-
-        while finish_reason is None:
+        remaining_request_ids = set(ordered_request_ids)
+        while remaining_request_ids:
             outputs_by_client, model_executed = self._engine.step()
             self._engine.post_step(model_executed)
             outputs = outputs_by_client.get(0)
             if outputs is None:
                 continue
             for output in outputs.outputs:
-                if output.request_id != request_id:
+                query = pending.get(output.request_id)
+                if query is None:
                     continue
-                token_ids.extend(output.new_token_ids)
+                query.token_ids.extend(output.new_token_ids)
                 if output.new_logprobs is not None:
-                    packed_logprobs.extend(
+                    query.logprobs.extend(
                         pack_logprobs_lists(
                             output.new_logprobs,
                             output.new_token_ids,
                         )
                     )
                 if output.new_prompt_logprobs_tensors is not None:
-                    packed_prompt_logprobs = pack_logprobs_tensors(
+                    query.prompt_logprobs = pack_logprobs_tensors(
                         output.new_prompt_logprobs_tensors,
-                        prefix_token_ids[1:],
+                        query.prefix_token_ids[1:],
                     )
-                finish_reason = output.finish_reason
-                stop_reason = output.stop_reason
-                if finish_reason is not None:
-                    break
+                query.finish_reason = output.finish_reason
+                query.stop_reason = output.stop_reason
+                if output.finish_reason is not None:
+                    remaining_request_ids.discard(output.request_id)
 
-        return EngineChunkResult(
-            token_ids=token_ids,
-            logprobs=packed_logprobs,
-            prompt_logprobs=packed_prompt_logprobs,
-            finish_reason=finish_reason,
-            stop_reason=stop_reason,
-        )
+        return [
+            EngineChunkResult(
+                token_ids=pending[request_id].token_ids,
+                logprobs=pending[request_id].logprobs,
+                prompt_logprobs=pending[request_id].prompt_logprobs,
+                finish_reason=pending[request_id].finish_reason,
+                stop_reason=pending[request_id].stop_reason,
+            )
+            for request_id in ordered_request_ids
+        ]
 
 
 class VllmEdgeDraftRunner:
@@ -578,6 +635,22 @@ class VllmCloudSession:
     structured_output_session: Any | None = None
 
 
+@dataclass
+class _ProposalVerificationState:
+    proposal: DraftProposal
+    session: VllmCloudSession
+    accepted_token_ids: list[int]
+    accepted_logprobs: list[PackedLogprobs] | None
+    generator_state: torch.Tensor
+    committed_structured_tokens: int = 0
+    final_prefix_token_ids: list[int] | None = None
+    final_version: int | None = None
+    result: VerificationResult | None = None
+
+    def current_prefix_token_ids(self) -> list[int]:
+        return list(self.session.accepted_prefix_token_ids) + self.accepted_token_ids
+
+
 class VllmTargetVerificationRunner:
     def __init__(
         self,
@@ -692,9 +765,84 @@ class VllmTargetVerificationRunner:
         self,
         proposal: DraftProposal,
     ) -> VerificationResult:
-        from vllm.v1.spec_decode.distributed.protocol import VerificationResult
+        return (await self.verify_proposals_batch([proposal]))[0]
 
-        session = self._sessions[proposal.session_id]
+    async def verify_proposals_batch(
+        self,
+        proposals: list[DraftProposal],
+    ) -> list[VerificationResult]:
+        if not proposals:
+            return []
+
+        states = [self._build_verification_state(proposal) for proposal in proposals]
+        try:
+            max_steps = max(len(state.proposal.draft_token_ids) for state in states)
+            for step_idx in range(max_steps):
+                active_states = [
+                    state
+                    for state in states
+                    if state.result is None
+                    and step_idx < len(state.proposal.draft_token_ids)
+                ]
+                if not active_states:
+                    continue
+                chunks = await self._runtime.run_queries(
+                    [
+                        EngineQuery(
+                            session_id=state.proposal.session_id,
+                            prefix_token_ids=state.current_prefix_token_ids(),
+                            sampling=state.session.sampling,
+                            max_tokens=1,
+                            logprobs=-1,
+                        )
+                        for state in active_states
+                    ]
+                )
+                for state, chunk in zip(active_states, chunks):
+                    self._apply_verification_step(state, step_idx, chunk)
+
+            bonus_states = [
+                state
+                for state in states
+                if state.result is None
+                and state.accepted_token_ids
+                and not state.proposal.draft_stopped
+            ]
+            if bonus_states:
+                chunks = await self._runtime.run_queries(
+                    [
+                        EngineQuery(
+                            session_id=state.proposal.session_id,
+                            prefix_token_ids=state.current_prefix_token_ids(),
+                            sampling=state.session.sampling,
+                            max_tokens=1,
+                            logprobs=-1,
+                        )
+                        for state in bonus_states
+                    ]
+                )
+                for state, chunk in zip(bonus_states, chunks):
+                    self._apply_bonus_step(state, chunk)
+
+            for state in states:
+                if state.result is None:
+                    self._finalize_accept_state(state)
+                self._commit_state(state)
+            return [state.result for state in states if state.result is not None]
+        except Exception:
+            for state in states:
+                self._rollback_state(state)
+            raise
+
+    def _build_verification_state(
+        self,
+        proposal: DraftProposal,
+    ) -> _ProposalVerificationState:
+        session = self._sessions.get(proposal.session_id)
+        if session is None:
+            raise VerifierSessionMissingError(
+                f"Unknown verifier session {proposal.session_id}."
+            )
         if proposal.base_version != session.version:
             raise ValueError(
                 f"Session {proposal.session_id} version mismatch: "
@@ -706,130 +854,143 @@ class VllmTargetVerificationRunner:
                 f"got {proposal.accepted_prefix_len}, "
                 f"expected {len(session.accepted_prefix_token_ids)}."
             )
+        return _ProposalVerificationState(
+            proposal=proposal,
+            session=session,
+            accepted_token_ids=[],
+            accepted_logprobs=(
+                [] if session.sampling.logprobs is not None else None
+            ),
+            generator_state=session.generator.get_state(),
+        )
 
-        accepted_token_ids: list[int] = []
-        accepted_logprobs = [] if session.sampling.logprobs is not None else None
-        prefix = list(session.accepted_prefix_token_ids)
+    def _apply_verification_step(
+        self,
+        state: _ProposalVerificationState,
+        reject_pos: int,
+        chunk: EngineChunkResult,
+    ) -> None:
+        if len(chunk.logprobs) != 1:
+            raise ValueError("Target verifier expected a single-token chunk result.")
+        sample = self._sample_query_result(state, chunk)
+        draft_token_id = state.proposal.draft_token_ids[reject_pos]
+        if sample.token_id != draft_token_id:
+            final_prefix = state.current_prefix_token_ids()
+            final_version = state.proposal.base_version + len(state.accepted_token_ids)
+            state.final_prefix_token_ids = final_prefix
+            state.final_version = final_version
+            state.result = VerificationResult(
+                session_id=state.proposal.session_id,
+                proposal_id=state.proposal.proposal_id,
+                base_version=state.proposal.base_version,
+                accepted_len=len(state.accepted_token_ids),
+                accepted_token_ids=list(state.accepted_token_ids),
+                reject_pos=reject_pos,
+                target_probs_at_reject_pos=serialize_probs(sample.probs),
+                verifier_version=final_version,
+                accepted_logprobs=list(state.accepted_logprobs or []),
+            )
+            return
 
-        for reject_pos, draft_token_id in enumerate(proposal.draft_token_ids):
-            chunk = await self._runtime.run_chunk(
-                proposal.session_id,
-                prefix + accepted_token_ids,
-                session.sampling,
-                max_tokens=1,
-                logprobs=-1,
+        state.accepted_token_ids.append(draft_token_id)
+        accept_structured_output_tokens(
+            state.session.structured_output_session,
+            [draft_token_id],
+        )
+        state.committed_structured_tokens += 1
+        if state.accepted_logprobs is not None:
+            packed = pack_sample_logprobs(
+                sample.probs,
+                sample.token_id,
+                state.session.sampling.logprobs,
             )
-            if len(chunk.logprobs) != 1:
-                raise ValueError(
-                    "Target verifier expected a single-token chunk result."
-                )
-            logits = _logits_from_packed_logprobs(
-                chunk.logprobs[0],
-                self.vocab_size,
-            )
-            masked_logits = apply_structured_output_mask(
-                logits,
-                session.structured_output_session,
-            )
-            sample = sample_from_logits(
-                masked_logits,
-                session.sampling,
-                prompt_token_ids=prefix[: session.prompt_len],
-                output_token_ids=(prefix + accepted_token_ids)[session.prompt_len :],
-                generator=session.generator,
-                suppress_stops=len(prefix) + len(accepted_token_ids)
-                - session.prompt_len < session.sampling.min_tokens,
-            )
-            if sample.token_id != draft_token_id:
-                session.accepted_prefix_token_ids = prefix + accepted_token_ids
-                session.version = proposal.base_version + len(accepted_token_ids)
-                return VerificationResult(
-                    session_id=proposal.session_id,
-                    proposal_id=proposal.proposal_id,
-                    base_version=proposal.base_version,
-                    accepted_len=len(accepted_token_ids),
-                    accepted_token_ids=accepted_token_ids,
-                    reject_pos=reject_pos,
-                    target_probs_at_reject_pos=serialize_probs(sample.probs),
-                    verifier_version=session.version,
-                    accepted_logprobs=accepted_logprobs or [],
-                )
-            accepted_token_ids.append(draft_token_id)
-            accept_structured_output_tokens(
-                session.structured_output_session,
-                [draft_token_id],
-            )
-            if accepted_logprobs is not None:
-                packed = pack_sample_logprobs(
-                    sample.probs,
-                    sample.token_id,
-                    session.sampling.logprobs,
-                )
-                assert packed is not None
-                accepted_logprobs.append(packed)
+            assert packed is not None
+            state.accepted_logprobs.append(packed)
 
-        session.accepted_prefix_token_ids = prefix + accepted_token_ids
-        session.version = proposal.base_version + len(accepted_token_ids)
-
-        bonus_token_id = None
+    def _apply_bonus_step(
+        self,
+        state: _ProposalVerificationState,
+        chunk: EngineChunkResult,
+    ) -> None:
+        if len(chunk.logprobs) != 1:
+            raise ValueError("Target verifier expected a single-token bonus result.")
+        sample = self._sample_query_result(state, chunk)
+        bonus_token_id = sample.token_id
+        accept_structured_output_tokens(
+            state.session.structured_output_session,
+            [bonus_token_id],
+        )
+        state.committed_structured_tokens += 1
         bonus_logprobs = None
-        if accepted_token_ids and not proposal.draft_stopped:
-            chunk = await self._runtime.run_chunk(
-                proposal.session_id,
-                session.accepted_prefix_token_ids,
-                session.sampling,
-                max_tokens=1,
-                logprobs=-1,
+        if state.session.sampling.logprobs is not None:
+            bonus_logprobs = pack_sample_logprobs(
+                sample.probs,
+                bonus_token_id,
+                state.session.sampling.logprobs,
             )
-            if len(chunk.logprobs) != 1:
-                raise ValueError(
-                    "Target verifier expected a single-token bonus result."
-                )
-            logits = _logits_from_packed_logprobs(
-                chunk.logprobs[0],
-                self.vocab_size,
-            )
-            masked_logits = apply_structured_output_mask(
-                logits,
-                session.structured_output_session,
-            )
-            sample = sample_from_logits(
-                masked_logits,
-                session.sampling,
-                prompt_token_ids=session.accepted_prefix_token_ids[: session.prompt_len],
-                output_token_ids=session.accepted_prefix_token_ids[session.prompt_len :],
-                generator=session.generator,
-                suppress_stops=len(session.accepted_prefix_token_ids)
-                - session.prompt_len < session.sampling.min_tokens,
-            )
-            bonus_token_id = sample.token_id
-            if session.sampling.logprobs is not None:
-                bonus_logprobs = pack_sample_logprobs(
-                    sample.probs,
-                    bonus_token_id,
-                    session.sampling.logprobs,
-                )
-            session.accepted_prefix_token_ids.append(bonus_token_id)
-            accept_structured_output_tokens(
-                session.structured_output_session,
-                [bonus_token_id],
-            )
-            session.version += 1
-
-        return VerificationResult(
-            session_id=proposal.session_id,
-            proposal_id=proposal.proposal_id,
-            base_version=proposal.base_version,
-            accepted_len=len(accepted_token_ids),
-            accepted_token_ids=accepted_token_ids,
-            verifier_version=session.version,
+        final_prefix = state.current_prefix_token_ids() + [bonus_token_id]
+        final_version = state.proposal.base_version + len(state.accepted_token_ids) + 1
+        state.final_prefix_token_ids = final_prefix
+        state.final_version = final_version
+        state.result = VerificationResult(
+            session_id=state.proposal.session_id,
+            proposal_id=state.proposal.proposal_id,
+            base_version=state.proposal.base_version,
+            accepted_len=len(state.accepted_token_ids),
+            accepted_token_ids=list(state.accepted_token_ids),
+            verifier_version=final_version,
             bonus_token_id=bonus_token_id,
-            accepted_logprobs=accepted_logprobs or [],
+            accepted_logprobs=list(state.accepted_logprobs or []),
             bonus_logprobs=bonus_logprobs,
         )
 
-    async def verify_proposals_batch(
+    def _finalize_accept_state(self, state: _ProposalVerificationState) -> None:
+        final_prefix = state.current_prefix_token_ids()
+        final_version = state.proposal.base_version + len(state.accepted_token_ids)
+        state.final_prefix_token_ids = final_prefix
+        state.final_version = final_version
+        state.result = VerificationResult(
+            session_id=state.proposal.session_id,
+            proposal_id=state.proposal.proposal_id,
+            base_version=state.proposal.base_version,
+            accepted_len=len(state.accepted_token_ids),
+            accepted_token_ids=list(state.accepted_token_ids),
+            verifier_version=final_version,
+            accepted_logprobs=list(state.accepted_logprobs or []),
+        )
+
+    def _commit_state(self, state: _ProposalVerificationState) -> None:
+        assert state.final_prefix_token_ids is not None
+        assert state.final_version is not None
+        state.session.accepted_prefix_token_ids = state.final_prefix_token_ids
+        state.session.version = state.final_version
+        state.committed_structured_tokens = 0
+
+    def _rollback_state(self, state: _ProposalVerificationState) -> None:
+        state.session.generator.set_state(state.generator_state)
+        rollback_structured_output_tokens(
+            state.session.structured_output_session,
+            state.committed_structured_tokens,
+        )
+        state.committed_structured_tokens = 0
+
+    def _sample_query_result(
         self,
-        proposals: list[DraftProposal],
-    ) -> list[VerificationResult]:
-        return [await self.verify_proposal(proposal) for proposal in proposals]
+        state: _ProposalVerificationState,
+        chunk: EngineChunkResult,
+    ):
+        logits = _logits_from_packed_logprobs(chunk.logprobs[0], self.vocab_size)
+        masked_logits = apply_structured_output_mask(
+            logits,
+            state.session.structured_output_session,
+        )
+        prefix_token_ids = state.current_prefix_token_ids()
+        return sample_from_logits(
+            masked_logits,
+            state.session.sampling,
+            prompt_token_ids=prefix_token_ids[: state.session.prompt_len],
+            output_token_ids=prefix_token_ids[state.session.prompt_len :],
+            generator=state.session.generator,
+            suppress_stops=len(prefix_token_ids) - state.session.prompt_len
+            < state.session.sampling.min_tokens,
+        )

@@ -419,6 +419,10 @@ Implementation update:
 - the current scheduler enforces one in-flight proposal per session within a
   micro-batch, supports an optional total draft-token budget per batch, and
   can time out proposals that wait too long in the verifier queue
+- with the vLLM-native verifier backend, proposals in the same micro-batch are
+  no longer verified strictly one-by-one; the verifier batches same-step
+  next-token queries across sessions and only falls back to sequential control
+  flow at the acceptance bookkeeping layer
 
 ### `CloudSessionRegistry`
 
