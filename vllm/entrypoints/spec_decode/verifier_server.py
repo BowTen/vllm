@@ -38,6 +38,9 @@ class VerifierServerArgs:
     log_level: str = "info"
     scheduler_max_batch_size: int = 8
     scheduler_batch_wait_ms: float = 1.0
+    scheduler_max_batch_tokens: int | None = None
+    scheduler_queue_timeout_ms: float | None = None
+    session_idle_timeout_s: float | None = None
 
 
 def build_app(args: VerifierServerArgs) -> FastAPI:
@@ -51,6 +54,9 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         runner,
         scheduler_max_batch_size=args.scheduler_max_batch_size,
         scheduler_batch_wait_ms=args.scheduler_batch_wait_ms,
+        scheduler_max_batch_tokens=args.scheduler_max_batch_tokens,
+        scheduler_queue_timeout_ms=args.scheduler_queue_timeout_ms,
+        session_idle_timeout_s=args.session_idle_timeout_s,
     )
 
     @asynccontextmanager

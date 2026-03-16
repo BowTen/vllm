@@ -34,6 +34,9 @@ class SpecVerifierSubcommand(CLISubcommand):
                 log_level=args.log_level,
                 scheduler_max_batch_size=args.scheduler_max_batch_size,
                 scheduler_batch_wait_ms=args.scheduler_batch_wait_ms,
+                scheduler_max_batch_tokens=args.scheduler_max_batch_tokens,
+                scheduler_queue_timeout_ms=args.scheduler_queue_timeout_ms,
+                session_idle_timeout_s=args.session_idle_timeout_s,
             )
         )
 
@@ -82,6 +85,24 @@ class SpecVerifierSubcommand(CLISubcommand):
             type=float,
             default=1.0,
             help="Maximum wait time, in milliseconds, to collect additional proposals.",
+        )
+        parser.add_argument(
+            "--scheduler-max-batch-tokens",
+            type=int,
+            default=None,
+            help="Optional total draft-token budget per verifier micro-batch.",
+        )
+        parser.add_argument(
+            "--scheduler-queue-timeout-ms",
+            type=float,
+            default=None,
+            help="Optional timeout, in milliseconds, for proposals waiting in the verifier queue.",
+        )
+        parser.add_argument(
+            "--session-idle-timeout-s",
+            type=float,
+            default=None,
+            help="Optional idle timeout in seconds after which verifier sessions are closed.",
         )
         parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return parser

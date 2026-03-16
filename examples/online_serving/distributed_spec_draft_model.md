@@ -17,7 +17,11 @@ CUDA_VISIBLE_DEVICES=1 vllm spec-verifier \
   --device cuda:0 \
   --dtype bfloat16 \
   --host 0.0.0.0 \
-  --port 9000
+  --port 9000 \
+  --scheduler-max-batch-size 8 \
+  --scheduler-max-batch-tokens 32 \
+  --scheduler-queue-timeout-ms 50 \
+  --session-idle-timeout-s 30
 ```
 
 On the edge node:
@@ -37,3 +41,10 @@ CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-0.6B \
 ```
 
 The OpenAI-compatible request path is unchanged; only the backend changes.
+
+Optional verifier tuning flags:
+
+- `--scheduler-max-batch-size`: cap the number of proposals per micro-batch
+- `--scheduler-max-batch-tokens`: cap the summed draft-token count per micro-batch
+- `--scheduler-queue-timeout-ms`: reject proposals that wait too long in the verifier queue
+- `--session-idle-timeout-s`: reclaim cloud-side verifier sessions after inactivity

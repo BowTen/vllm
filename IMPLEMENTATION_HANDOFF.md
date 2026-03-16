@@ -398,6 +398,12 @@ Responsibilities:
   exists; a batch-oriented scheduler API with sequential fallback is acceptable
   as an intermediate step
 
+Implementation update:
+
+- the current scheduler enforces one in-flight proposal per session within a
+  micro-batch, supports an optional total draft-token budget per batch, and
+  can time out proposals that wait too long in the verifier queue
+
 ### `CloudSessionRegistry`
 
 Role:
@@ -411,6 +417,11 @@ Suggested per-session fields:
 - target-side runtime state / KV state
 - active proposal bookkeeping
 - lease or timeout metadata
+
+Implementation update:
+
+- the current registry tracks prefix length, active proposal count, and idle
+  timestamps, and supports background idle-session reaping on the verifier
 
 ### `TargetVerificationRunner`
 
