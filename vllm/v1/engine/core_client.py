@@ -89,6 +89,22 @@ class EngineCoreClient(ABC):
                 "is not currently supported."
             )
 
+        if (
+            multiprocess_mode
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.uses_distributed_draft_model()
+        ):
+            from vllm.v1.spec_decode.distributed.edge_core_client import (
+                DistributedSpecEdgeCoreClient,
+            )
+
+            return DistributedSpecEdgeCoreClient(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+                sync_mode=not asyncio_mode,
+            )
+
         if multiprocess_mode and asyncio_mode:
             return EngineCoreClient.make_async_mp_client(
                 vllm_config, executor_class, log_stats
@@ -123,6 +139,7 @@ class EngineCoreClient(ABC):
                 log_stats=log_stats,
                 client_count=client_count,
                 client_index=client_index,
+                sync_mode=False,
             )
 
         parallel_config = vllm_config.parallel_config

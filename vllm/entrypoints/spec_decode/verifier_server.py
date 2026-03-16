@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import msgspec.msgpack
@@ -21,6 +22,7 @@ from vllm.v1.spec_decode.distributed.protocol import (
     VerificationResult,
 )
 from vllm.v1.spec_decode.distributed.verifier import TargetVerificationRunner
+from vllm.v1.spec_decode.distributed.verification_core import VerificationCore
 
 logger = init_logger(__name__)
 
@@ -37,13 +39,20 @@ class VerifierServerArgs:
 
 
 def build_app(args: VerifierServerArgs) -> FastAPI:
-    app = FastAPI()
     runner = TargetVerificationRunner(
         model_name=args.model,
         device=args.device,
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
     )
+    core = VerificationCore(runner)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await core.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -54,7 +63,7 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         payload = msgspec.msgpack.decode(
             await request.body(), type=OpenSessionRequest
         )
-        result: OpenSessionResponse = await runner.open_session(payload)
+        result: OpenSessionResponse = await core.open_session(payload)
         return Response(
             content=MSGPACK_ENCODER.encode(result),
             media_type="application/msgpack",
@@ -63,7 +72,7 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
     @app.post("/verify_proposal")
     async def verify_proposal(request: Request) -> Response:
         payload = msgspec.msgpack.decode(await request.body(), type=DraftProposal)
-        result: VerificationResult = await runner.verify_proposal(payload)
+        result: VerificationResult = await core.verify_proposal(payload)
         return Response(
             content=MSGPACK_ENCODER.encode(result),
             media_type="application/msgpack",
@@ -74,7 +83,7 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         payload = msgspec.msgpack.decode(
             await request.body(), type=ResyncSessionRequest
         )
-        result: ResyncSessionResponse = await runner.resync_session(payload)
+        result: ResyncSessionResponse = await core.resync_session(payload)
         return Response(
             content=MSGPACK_ENCODER.encode(result),
             media_type="application/msgpack",
@@ -85,7 +94,7 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         payload = msgspec.msgpack.decode(
             await request.body(), type=CloseSessionRequest
         )
-        await runner.close_session(payload)
+        await core.close_session(payload)
         return Response(status_code=204)
 
     return app
