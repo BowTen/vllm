@@ -109,6 +109,22 @@ class EngineCoreClient(ABC):
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncMPClient":
+        if (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.uses_distributed_draft_model()
+        ):
+            from vllm.v1.spec_decode.distributed.edge_core_client import (
+                DistributedSpecEdgeCoreClient,
+            )
+
+            return DistributedSpecEdgeCoreClient(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+                client_count=client_count,
+                client_index=client_index,
+            )
+
         parallel_config = vllm_config.parallel_config
         client_args = (
             vllm_config,

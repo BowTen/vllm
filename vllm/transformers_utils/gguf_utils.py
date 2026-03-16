@@ -8,9 +8,21 @@ from pathlib import Path
 
 import gguf
 import regex as re
-from gguf.constants import Keys, VisionProjectorType
+try:
+    from gguf.constants import Keys, VisionProjectorType
+except ImportError:
+    from gguf.constants import Keys
+
+    class VisionProjectorType:
+        GEMMA3 = "gemma3"
 from gguf.quants import GGMLQuantizationType
-from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
+try:
+    from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
+except ImportError:
+    from transformers import PretrainedConfig, SiglipVisionConfig  # type: ignore[misc]
+
+    class Gemma3Config(PretrainedConfig):
+        pass
 
 from vllm.logger import init_logger
 

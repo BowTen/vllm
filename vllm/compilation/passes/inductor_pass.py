@@ -19,7 +19,14 @@ from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 if TYPE_CHECKING:
     from vllm.config.utils import Range
 
-from torch._inductor.custom_graph_pass import CustomGraphPass
+try:
+    from torch._inductor.custom_graph_pass import CustomGraphPass
+except ImportError:
+    # Torch versions prior to 2.9 do not expose CustomGraphPass. We keep a
+    # minimal fallback so the rest of vLLM can still import in environments
+    # that disable or do not need Inductor graph passes.
+    class CustomGraphPass:  # type: ignore[no-redef]
+        pass
 
 _pass_context = None
 P = ParamSpec("P")

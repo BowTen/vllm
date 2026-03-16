@@ -169,6 +169,19 @@ class SpeculativeConfig:
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
 
+    verifier_url: str | None = None
+    """If set, enable the experimental distributed draft-model flow where the
+    draft model runs locally and the target model is verified by a remote
+    verifier service reachable at this URL."""
+
+    draft_device: str | None = None
+    """Override the device used by the experimental distributed draft-model
+    runtime. Defaults to ``cuda`` when available and ``cpu`` otherwise."""
+
+    verifier_timeout_s: float = Field(default=30.0, gt=0.0)
+    """Timeout, in seconds, for verifier RPCs used by the experimental
+    distributed draft-model flow."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -760,6 +773,11 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        if self.verifier_url is not None and self.method != "draft_model":
+            raise ValueError(
+                "verifier_url is only supported with method='draft_model'."
+            )
+
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
@@ -829,6 +847,9 @@ class SpeculativeConfig:
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
+    def uses_distributed_draft_model(self) -> bool:
+        return self.uses_draft_model() and self.verifier_url is not None
+
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"
 
@@ -840,4 +861,8 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+        distributed = self.uses_distributed_draft_model()
+        return (
+            f"SpeculativeConfig({method=}, {model=}, "
+            f"{num_spec_tokens=}, {distributed=})"
+        )

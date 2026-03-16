@@ -9,7 +9,10 @@ from _hashlib import HASH, UnsupportedDigestmodError
 from collections.abc import Callable
 from typing import Any
 
-import cbor2
+try:
+    import cbor2
+except ImportError:  # pragma: no cover
+    cbor2 = None
 
 try:
     # It is important that this remains an optional dependency.
@@ -54,6 +57,11 @@ def sha256_cbor(input: Any) -> bytes:
     Returns:
         Bytes representing the SHA-256 hash of the CBOR serialized input.
     """
+    if cbor2 is None:
+        raise ModuleNotFoundError(
+            "cbor2 is required for the 'sha256_cbor' hash algorithm. "
+            "Install it via `pip install cbor2`."
+        )
     input_bytes = cbor2.dumps(input, canonical=True)
     return hashlib.sha256(input_bytes).digest()
 
@@ -75,6 +83,11 @@ def xxhash(input: Any) -> bytes:
 
 def xxhash_cbor(input: Any) -> bytes:
     """Hash objects serialized with CBOR using xxHash."""
+    if cbor2 is None:
+        raise ModuleNotFoundError(
+            "cbor2 is required for the 'xxhash_cbor' hash algorithm. "
+            "Install it via `pip install cbor2`."
+        )
     input_bytes = cbor2.dumps(input, canonical=True)
     return _xxhash_digest(input_bytes)
 
