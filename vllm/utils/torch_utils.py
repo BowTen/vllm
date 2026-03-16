@@ -5,9 +5,22 @@ import importlib.metadata
 import os
 import random
 import threading
+import types
 from collections.abc import Callable, Collection
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
 
 import numpy as np
 import numpy.typing as npt
@@ -789,6 +802,31 @@ def supports_xpu_graph() -> bool:
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
+def _normalize_annotation_for_infer_schema(annotation: Any) -> Any:
+    """Backport PEP 585/604 annotations for older torch infer_schema."""
+    origin = get_origin(annotation)
+    if origin is None:
+        return annotation
+
+    args = tuple(_normalize_annotation_for_infer_schema(arg)
+                 for arg in get_args(annotation))
+
+    if origin is list:
+        return List[args[0]]
+    if origin is dict:
+        return Dict[args[0], args[1]]
+    if origin is tuple:
+        return Tuple[args] if len(args) == 1 else Tuple[args]
+    if origin is set:
+        return Set[args[0]]
+    if origin in {Union, types.UnionType}:
+        non_none_args = tuple(arg for arg in args if arg is not type(None))
+        if len(non_none_args) + 1 == len(args) and len(non_none_args) == 1:
+            return Optional[non_none_args[0]]
+        return Union[args]
+    return annotation
+
+
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
@@ -821,7 +859,22 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    annotations = getattr(op_func, "__annotations__", None)
+    original_annotations = None
+    if annotations:
+        normalized_annotations = {
+            name: _normalize_annotation_for_infer_schema(annotation)
+            for name, annotation in annotations.items()
+        }
+        if normalized_annotations != annotations:
+            original_annotations = annotations.copy()
+            op_func.__annotations__ = normalized_annotations
+
+    try:
+        schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    finally:
+        if original_annotations is not None:
+            op_func.__annotations__ = original_annotations
 
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)

@@ -305,6 +305,11 @@ set(VLLM_EXT_SRC
   "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
+if(VLLM_GPU_LANG STREQUAL "CUDA" AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.3)
+  list(REMOVE_ITEM VLLM_EXT_SRC "csrc/quantization/activation_kernels.cu")
+  message(STATUS "Skipping quantization activation kernels: CUDA compiler ${CMAKE_CUDA_COMPILER_VERSION} is too old.")
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 

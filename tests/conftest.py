@@ -71,7 +71,10 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
-from torch._inductor.utils import fresh_cache
+try:
+    from torch._inductor.utils import fresh_cache
+except ImportError:
+    from torch._inductor.utils import fresh_inductor_cache as fresh_cache
 
 
 if TYPE_CHECKING:
