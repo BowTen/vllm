@@ -28,7 +28,11 @@ from vllm.v1.spec_decode.distributed.protocol import (
     SamplingMetadata,
     VerificationResult,
 )
-from vllm.v1.spec_decode.distributed.runtime import EdgeDraftRunner, deserialize_probs
+from vllm.v1.spec_decode.distributed.runtime import (
+    DraftProposalOutput,
+    EdgeDraftRunner,
+    deserialize_probs,
+)
 from vllm.v1.spec_decode.distributed.structured_output import (
     StructuredOutputFactory,
     StructuredOutputSession,
@@ -36,7 +40,7 @@ from vllm.v1.spec_decode.distributed.structured_output import (
 )
 from vllm.v1.spec_decode.distributed.sampling import (
     is_terminal_token,
-    sample_from_probs,
+    sample_recovered_token,
 )
 
 
@@ -217,7 +221,11 @@ class EdgeSessionCore:
                 finish_reason,
                 stop_reason,
                 needs_resync,
-            ) = self._apply_verification_result(session, verification)
+            ) = self._apply_verification_result(
+                session,
+                proposal_output,
+                verification,
+            )
 
             if needs_resync and finish_reason is None:
                 await self._verifier.resync_session(self._build_resync_request(session))
@@ -270,6 +278,7 @@ class EdgeSessionCore:
     def _apply_verification_result(
         self,
         session: EdgeSessionState,
+        proposal_output: DraftProposalOutput,
         verification: VerificationResult,
     ) -> tuple[
         list[int],
@@ -291,19 +300,27 @@ class EdgeSessionCore:
         )
         needs_resync = verification.reject_pos is not None
         if needs_resync:
-            probs = deserialize_probs(
+            target_probs = deserialize_probs(
                 verification.target_probs_at_reject_pos or b"",
                 self._draft_runner.vocab_size,
             )
-            sampled_token_id = sample_from_probs(
-                probs,
+            reject_pos = verification.reject_pos
+            assert reject_pos is not None
+            if reject_pos >= len(proposal_output.draft_token_distributions):
+                raise ValueError(
+                    f"Session {session.request_id} missing local draft distribution "
+                    f"for reject position {reject_pos}."
+                )
+            sampled_token_id = sample_recovered_token(
+                target_probs,
+                proposal_output.draft_token_distributions[reject_pos],
                 session.generator,
                 greedy=session.sampling.temperature <= 0,
             )
             committed.append(sampled_token_id)
             if session.sampling.logprobs is not None:
                 packed = pack_sample_logprobs(
-                    probs,
+                    target_probs,
                     sampled_token_id,
                     session.sampling.logprobs,
                 )

@@ -119,14 +119,14 @@ def apply_sampling_transforms(
     return logits
 
 
-def sample_from_logits(
+def probs_from_logits(
     logits: torch.Tensor,
     sampling: SamplingMetadata,
     prompt_token_ids: list[int],
     output_token_ids: list[int],
-    generator: torch.Generator,
+    *,
     suppress_stops: bool,
-) -> SampleResult:
+) -> torch.Tensor:
     transformed = apply_sampling_transforms(
         logits, sampling, prompt_token_ids, output_token_ids
     )
@@ -157,9 +157,29 @@ def sample_from_logits(
     probs = torch.softmax(filtered, dim=-1)
     if not torch.isfinite(probs).all() or float(probs.sum().item()) == 0.0:
         raise ValueError("Sampling produced an invalid probability distribution.")
+    return probs
+
+
+def sample_from_logits(
+    logits: torch.Tensor,
+    sampling: SamplingMetadata,
+    prompt_token_ids: list[int],
+    output_token_ids: list[int],
+    generator: torch.Generator,
+    suppress_stops: bool,
+) -> SampleResult:
+    probs = probs_from_logits(
+        logits,
+        sampling,
+        prompt_token_ids,
+        output_token_ids,
+        suppress_stops=suppress_stops,
+    )
+
+    greedy = sampling.temperature <= 0
 
     if greedy:
-        token_id = int(torch.argmax(filtered).item())
+        token_id = int(torch.argmax(probs).item())
         return SampleResult(
             token_id=token_id,
             token_prob=float(probs[token_id].item()),
@@ -189,3 +209,67 @@ def sample_from_probs(
     if greedy:
         return int(torch.argmax(probs).item())
     return int(torch.multinomial(probs, 1, generator=generator).item())
+
+
+def should_accept_draft_token(
+    target_probs: torch.Tensor,
+    draft_token_id: int,
+    draft_token_prob: float,
+    generator: torch.Generator,
+    *,
+    greedy: bool = False,
+) -> bool:
+    if draft_token_id < 0 or draft_token_id >= target_probs.numel():
+        raise ValueError(
+            f"Draft token id {draft_token_id} is outside the target vocabulary."
+        )
+
+    if greedy:
+        return draft_token_id == int(torch.argmax(target_probs).item())
+
+    if draft_token_prob <= 0:
+        return False
+
+    target_prob = float(target_probs[draft_token_id].item())
+    accept_prob = max(0.0, min(1.0, target_prob / draft_token_prob))
+    if accept_prob <= 0.0:
+        return False
+    if accept_prob >= 1.0:
+        return True
+    uniform = float(
+        torch.rand((), dtype=torch.float64, generator=generator).item()
+    )
+    return uniform <= accept_prob
+
+
+def residual_probs_from_distributions(
+    target_probs: torch.Tensor,
+    draft_probs: torch.Tensor,
+) -> torch.Tensor:
+    target_probs = target_probs.to(dtype=torch.float32)
+    draft_probs = draft_probs.to(dtype=torch.float32, device=target_probs.device)
+    if target_probs.shape != draft_probs.shape:
+        raise ValueError(
+            "Target and draft probability distributions must share the same shape."
+        )
+    return (target_probs - draft_probs).clamp_min(0.0)
+
+
+def sample_recovered_token(
+    target_probs: torch.Tensor,
+    draft_probs: torch.Tensor,
+    generator: torch.Generator,
+    *,
+    greedy: bool = False,
+) -> int:
+    if greedy:
+        return int(torch.argmax(target_probs).item())
+
+    residual = residual_probs_from_distributions(target_probs, draft_probs)
+    total = float(residual.sum().item())
+    if total <= 0.0:
+        raise ValueError(
+            "Recovered-token residual distribution is empty; "
+            "cannot sample after speculative rejection."
+        )
+    return sample_from_probs(residual, generator, greedy=False)

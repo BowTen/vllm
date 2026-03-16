@@ -77,6 +77,11 @@ class FakeDraftRunner:
             2: ([88], True),
         }
         draft_token_ids, draft_stopped = proposal_tokens[proposal_id]
+        draft_token_distributions = []
+        for token_id in draft_token_ids:
+            probs = torch.zeros(self.vocab_size, dtype=torch.float32)
+            probs[token_id] = 1.0
+            draft_token_distributions.append(probs)
         return DraftProposalOutput(
             proposal=DraftProposal(
                 session_id=session_id,
@@ -88,6 +93,7 @@ class FakeDraftRunner:
                 draft_stopped=draft_stopped,
             ),
             stopped=draft_stopped,
+            draft_token_distributions=draft_token_distributions,
         )
 
     def close_session(self, session_id: str) -> None:
@@ -300,6 +306,58 @@ async def test_edge_session_core_emits_logprobs_for_verified_tokens():
     assert steps[0].new_logprobs.logprob_token_ids.shape == (3, 2)
     assert steps[1].new_logprobs.logprob_token_ids.tolist() == [[77, 77]]
     assert steps[2].new_logprobs.logprob_token_ids.tolist() == [[88, 88]]
+
+
+def test_edge_session_core_uses_local_draft_distribution_for_recovery():
+    request = make_request(request_id="request-residual", max_tokens=1, logprobs=1)
+    request.sampling_params.temperature = 1.0
+    draft_runner = FakeDraftRunner()
+    verifier = FakeVerifierClient()
+    core = EdgeSessionCore(draft_runner, verifier)
+
+    session = core.create_session(request)
+    proposal_output = DraftProposalOutput(
+        proposal=DraftProposal(
+            session_id=request.request_id,
+            proposal_id=0,
+            base_version=session.version,
+            accepted_prefix_len=len(session.accepted_prefix_token_ids),
+            draft_token_ids=[0],
+            draft_token_probs=[0.9],
+        ),
+        stopped=False,
+        draft_token_distributions=[
+            torch.tensor(
+                [0.9, 0.0, 0.1] + [0.0] * (FakeDraftRunner.vocab_size - 3),
+                dtype=torch.float32,
+            )
+        ],
+    )
+    target_probs = torch.tensor(
+        [0.55, 0.0, 0.45] + [0.0] * (FakeDraftRunner.vocab_size - 3),
+        dtype=torch.float32,
+    )
+    verification = VerificationResult(
+        session_id=request.request_id,
+        proposal_id=0,
+        base_version=session.version,
+        accepted_len=0,
+        accepted_token_ids=[],
+        verifier_version=session.version,
+        reject_pos=0,
+        target_probs_at_reject_pos=serialize_probs(target_probs),
+    )
+
+    emitted, emitted_logprobs, finish_reason, stop_reason, needs_resync = (
+        core._apply_verification_result(session, proposal_output, verification)
+    )
+
+    assert emitted == [2]
+    assert emitted_logprobs is not None
+    assert emitted_logprobs.logprob_token_ids[0][0] == 2
+    assert finish_reason == FinishReason.LENGTH
+    assert stop_reason is None
+    assert needs_resync is True
 
 
 @pytest.mark.asyncio

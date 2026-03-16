@@ -6,8 +6,11 @@ import torch
 from vllm.v1.spec_decode.distributed.protocol import SamplingMetadata
 from vllm.v1.spec_decode.distributed.sampling import (
     is_terminal_token,
+    residual_probs_from_distributions,
     sample_from_logits,
     sample_from_probs,
+    sample_recovered_token,
+    should_accept_draft_token,
 )
 
 
@@ -76,6 +79,54 @@ def test_sample_from_probs_supports_greedy_mode():
         greedy=True,
     )
     assert token_id == 1
+
+
+def test_should_accept_draft_token_uses_p_over_q_ratio():
+    target_probs = torch.tensor([0.1, 0.6, 0.3], dtype=torch.float32)
+
+    assert should_accept_draft_token(
+        target_probs,
+        draft_token_id=1,
+        draft_token_prob=0.75,
+        generator=torch.Generator(device="cpu").manual_seed(1),
+        greedy=False,
+    )
+    assert not should_accept_draft_token(
+        target_probs,
+        draft_token_id=1,
+        draft_token_prob=2.0,
+        generator=torch.Generator(device="cpu").manual_seed(0),
+        greedy=False,
+    )
+
+
+def test_sample_recovered_token_uses_positive_residual():
+    target_probs = torch.tensor([0.55, 0.0, 0.45], dtype=torch.float32)
+    draft_probs = torch.tensor([0.9, 0.0, 0.1], dtype=torch.float32)
+
+    residual = residual_probs_from_distributions(target_probs, draft_probs)
+    assert torch.equal(residual, torch.tensor([0.0, 0.0, 0.35]))
+
+    token_id = sample_recovered_token(
+        target_probs,
+        draft_probs,
+        torch.Generator(device="cpu").manual_seed(123),
+        greedy=False,
+    )
+    assert token_id == 2
+
+
+def test_sample_recovered_token_uses_target_argmax_for_greedy():
+    target_probs = torch.tensor([0.55, 0.0, 0.45], dtype=torch.float32)
+    draft_probs = torch.tensor([0.9, 0.0, 0.1], dtype=torch.float32)
+
+    token_id = sample_recovered_token(
+        target_probs,
+        draft_probs,
+        torch.Generator(device="cpu").manual_seed(123),
+        greedy=True,
+    )
+    assert token_id == 0
 
 
 def test_is_terminal_token_requires_min_tokens():

@@ -146,6 +146,11 @@ class FakeDraftRunner:
             2: ([88], True),
         }
         draft_token_ids, draft_stopped = proposal_tokens[proposal_id]
+        draft_token_distributions = []
+        for token_id in draft_token_ids:
+            probs = torch.zeros(self.vocab_size, dtype=torch.float32)
+            probs[token_id] = 1.0
+            draft_token_distributions.append(probs)
         return DraftProposalOutput(
             proposal=DraftProposal(
                 session_id=session_id,
@@ -157,6 +162,7 @@ class FakeDraftRunner:
                 draft_stopped=draft_stopped,
             ),
             stopped=draft_stopped,
+            draft_token_distributions=draft_token_distributions,
         )
 
     def close_session(self, session_id: str) -> None:

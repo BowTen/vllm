@@ -494,6 +494,14 @@ Minimum expected fields:
 - `draft_token_ids`
 - `draft_token_probs`
 
+Implementation update:
+
+- `draft_token_probs` now carries only `q(draft_token)` for verifier-side
+  `min(1, p/q)` acceptance checks
+- the edge keeps the full per-step draft distributions locally inside the
+  proposal state so exact residual recovery can be computed on reject without
+  sending the entire draft vocabulary distribution over RPC
+
 Optional future fields:
 
 - top-k draft distributions
@@ -666,6 +674,15 @@ The result should support at least two cases:
 - all proposed tokens accepted, plus bonus token
 - partial acceptance with a reject position and recovery distribution
 
+Implementation update:
+
+- verifier acceptance now follows the strict speculative rule:
+  accept draft token `x` with probability `min(1, p(x) / q(x))`
+- on reject, the verifier returns the full target distribution at the reject
+  step and the edge samples the recovery token from the positive residual
+  distribution `(p - q)+` using its locally retained draft distribution for
+  that same step
+
 ### Step 6: edge commits only confirmed output
 
 The edge side should update the accepted prefix using the verification result.
@@ -797,6 +814,13 @@ They should not block the first milestone.
 - whether rejection recovery returns only one-step target probabilities or richer metadata
 - whether the first milestone should do conservative recovery only
 - exact verifier-side batching policy
+
+Implementation update:
+
+- exact rejection recovery now uses one-step target probabilities from the
+  verifier plus edge-local full draft distributions for the same proposal step;
+  no extra RPC payload beyond `draft_token_probs` and
+  `target_probs_at_reject_pos` was needed
 
 Recommended default:
 

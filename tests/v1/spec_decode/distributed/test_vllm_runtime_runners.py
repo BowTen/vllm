@@ -22,15 +22,21 @@ from vllm.v1.spec_decode.distributed.protocol import (
 )
 
 
-def _sampling(*, logprobs: int | None = 1) -> SamplingMetadata:
+def _sampling(
+    *,
+    logprobs: int | None = 1,
+    temperature: float = 0.0,
+    seed: int | None = None,
+) -> SamplingMetadata:
     return SamplingMetadata(
-        temperature=0.0,
+        temperature=temperature,
         top_p=1.0,
         top_k=0,
         min_p=0.0,
         presence_penalty=0.0,
         frequency_penalty=0.0,
         repetition_penalty=1.0,
+        seed=seed,
         max_tokens=8,
         min_tokens=0,
         stop_token_ids=[],
@@ -198,6 +204,67 @@ async def test_vllm_target_runner_returns_reject_distribution(
     assert result.target_probs_at_reject_pos is not None
     assert result.verifier_version == 5
     assert len(result.accepted_logprobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_vllm_target_runner_uses_acceptance_ratio_not_sample_equality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_runtime = FakeRuntime(
+        [
+            runtime_mod.EngineChunkResult(
+                token_ids=[0],
+                logprobs=[_packed([0.2, 0.7, 0.1, 0.0], 0)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        runtime_mod,
+        "build_target_runtime_config",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(runtime_mod, "VllmEngineSessionRuntime", lambda _cfg: fake_runtime)
+    monkeypatch.setattr(
+        runtime_mod,
+        "StructuredOutputFactory",
+        _fake_structured_output_factory,
+    )
+    monkeypatch.setattr(runtime_mod, "should_accept_draft_token", lambda *args, **kwargs: True)
+
+    runner = runtime_mod.VllmTargetVerificationRunner(
+        model_name="fake-model",
+        device=None,
+        dtype="auto",
+        trust_remote_code=False,
+    )
+    await runner.open_session(
+        OpenSessionRequest(
+            session_id="session-accept-ratio",
+            prompt_token_ids=[9],
+            sampling_metadata=_sampling(logprobs=1, temperature=1.0, seed=0),
+            initial_version=2,
+        )
+    )
+
+    result = await runner.verify_proposal(
+        DraftProposal(
+            session_id="session-accept-ratio",
+            proposal_id=0,
+            base_version=2,
+            accepted_prefix_len=1,
+            draft_token_ids=[1],
+            draft_token_probs=[0.9],
+            draft_stopped=True,
+        )
+    )
+
+    assert result.accepted_len == 1
+    assert result.accepted_token_ids == [1]
+    assert result.reject_pos is None
+    assert result.accepted_logprobs[0].token_ids[0] == 1
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,10 @@ from vllm.v1.spec_decode.distributed.structured_output import (
     apply_structured_output_mask,
     reset_structured_output_session,
 )
+from vllm.v1.spec_decode.distributed.sampling import (
+    probs_from_logits,
+    should_accept_draft_token,
+)
 
 logger = init_logger(__name__)
 
@@ -137,19 +141,33 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         accepted_logprobs = (
             [] if session.sampling.logprobs is not None else None
         )
+        if len(proposal.draft_token_ids) != len(proposal.draft_token_probs):
+            raise ValueError(
+                "Draft proposal token ids and token probabilities must have the "
+                "same length."
+            )
         for reject_pos, draft_token_id in enumerate(proposal.draft_token_ids):
             masked_logits = apply_structured_output_mask(
                 temp_state.next_logits,
                 session.structured_output_session,
             )
-            sample = self.sample_next_token_from_state(
-                temp_state,
-                prompt_len=session.prompt_len,
-                sampling=session.sampling,
-                generator=session.generator,
-                logits=masked_logits,
+            prefix = accepted_prefix + accepted_token_ids
+            target_probs = probs_from_logits(
+                masked_logits,
+                session.sampling,
+                prompt_token_ids=prefix[: session.prompt_len],
+                output_token_ids=prefix[session.prompt_len :],
+                suppress_stops=len(prefix) - session.prompt_len
+                < session.sampling.min_tokens,
             )
-            if sample.token_id != draft_token_id:
+            accepted = should_accept_draft_token(
+                target_probs,
+                draft_token_id,
+                proposal.draft_token_probs[reject_pos],
+                session.generator,
+                greedy=session.sampling.temperature <= 0,
+            )
+            if not accepted:
                 prefix = accepted_prefix + accepted_token_ids
                 session.accepted_prefix_token_ids = prefix
                 session.runtime_state = temp_state
@@ -161,7 +179,7 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
                     accepted_len=len(accepted_token_ids),
                     accepted_token_ids=accepted_token_ids,
                     reject_pos=reject_pos,
-                    target_probs_at_reject_pos=serialize_probs(sample.probs),
+                    target_probs_at_reject_pos=serialize_probs(target_probs),
                     verifier_version=session.version,
                     accepted_logprobs=accepted_logprobs or [],
                 )
@@ -172,8 +190,8 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
             )
             if accepted_logprobs is not None:
                 packed = pack_sample_logprobs(
-                    sample.probs,
-                    sample.token_id,
+                    target_probs,
+                    draft_token_id,
                     session.sampling.logprobs,
                 )
                 assert packed is not None

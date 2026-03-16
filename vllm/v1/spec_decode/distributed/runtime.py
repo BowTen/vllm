@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -267,6 +267,7 @@ class BaseCausalLMRuntime:
 class DraftProposalOutput:
     proposal: DraftProposal
     stopped: bool
+    draft_token_distributions: list[torch.Tensor] = field(default_factory=list)
 
 
 class EdgeDraftRunner(BaseCausalLMRuntime):
@@ -328,6 +329,7 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
     ) -> DraftProposalOutput:
         draft_token_ids: list[int] = []
         draft_token_probs: list[float] = []
+        draft_token_distributions: list[torch.Tensor] = []
         remaining = None
         current_output_len = len(accepted_prefix_token_ids) - prompt_len
         if sampling.max_tokens is not None:
@@ -359,6 +361,9 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
                 )
                 draft_token_ids.append(result.token_id)
                 draft_token_probs.append(result.token_prob)
+                draft_token_distributions.append(
+                    result.probs.to(dtype=torch.float32, device="cpu").clone()
+                )
                 accept_structured_output_tokens(
                     structured_output_session,
                     [result.token_id],
@@ -386,4 +391,5 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
                 draft_stopped=stopped,
             ),
             stopped=stopped,
+            draft_token_distributions=draft_token_distributions,
         )

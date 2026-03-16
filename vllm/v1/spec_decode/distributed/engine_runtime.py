@@ -40,8 +40,12 @@ from vllm.v1.spec_decode.distributed.protocol import (
     VerificationResult,
 )
 from vllm.v1.spec_decode.distributed.sampling import (
+    SampleResult,
     is_terminal_token,
+    probs_from_logits,
     sample_from_logits,
+    sample_from_probs,
+    should_accept_draft_token,
 )
 from vllm.v1.spec_decode.distributed.structured_output import (
     StructuredOutputFactory,
@@ -250,6 +254,7 @@ class _DraftProposalBatchState:
     generator_state: torch.Tensor
     draft_token_ids: list[int] = field(default_factory=list)
     draft_token_probs: list[float] = field(default_factory=list)
+    draft_token_distributions: list[torch.Tensor] = field(default_factory=list)
     structured_advances: int = 0
 
 
@@ -739,6 +744,9 @@ class VllmEdgeDraftRunner:
                     )
                     state.draft_token_ids.append(sample.token_id)
                     state.draft_token_probs.append(sample.token_prob)
+                    state.draft_token_distributions.append(
+                        sample.probs.to(dtype=torch.float32, device="cpu").clone()
+                    )
                     state.prefix_token_ids.append(sample.token_id)
                     accept_structured_output_tokens(
                         state.job.structured_output_session,
@@ -790,6 +798,7 @@ class VllmEdgeDraftRunner:
                 draft_stopped=state.stopped,
             ),
             stopped=state.stopped,
+            draft_token_distributions=state.draft_token_distributions,
         )
 
 
@@ -1023,6 +1032,11 @@ class VllmTargetVerificationRunner:
                 f"got {proposal.accepted_prefix_len}, "
                 f"expected {len(session.accepted_prefix_token_ids)}."
             )
+        if len(proposal.draft_token_ids) != len(proposal.draft_token_probs):
+            raise ValueError(
+                "Draft proposal token ids and token probabilities must have the "
+                "same length."
+            )
         return _ProposalVerificationState(
             proposal=proposal,
             session=session,
@@ -1041,9 +1055,16 @@ class VllmTargetVerificationRunner:
     ) -> None:
         if len(chunk.logprobs) != 1:
             raise ValueError("Target verifier expected a single-token chunk result.")
-        sample = self._sample_query_result(state, chunk)
+        target_probs = self._query_result_probs(state, chunk)
         draft_token_id = state.proposal.draft_token_ids[reject_pos]
-        if sample.token_id != draft_token_id:
+        accepted = should_accept_draft_token(
+            target_probs,
+            draft_token_id,
+            state.proposal.draft_token_probs[reject_pos],
+            state.session.generator,
+            greedy=state.session.sampling.temperature <= 0,
+        )
+        if not accepted:
             final_prefix = state.current_prefix_token_ids()
             final_version = state.proposal.base_version + len(state.accepted_token_ids)
             state.final_prefix_token_ids = final_prefix
@@ -1055,7 +1076,7 @@ class VllmTargetVerificationRunner:
                 accepted_len=len(state.accepted_token_ids),
                 accepted_token_ids=list(state.accepted_token_ids),
                 reject_pos=reject_pos,
-                target_probs_at_reject_pos=serialize_probs(sample.probs),
+                target_probs_at_reject_pos=serialize_probs(target_probs),
                 verifier_version=final_version,
                 accepted_logprobs=list(state.accepted_logprobs or []),
             )
@@ -1069,8 +1090,8 @@ class VllmTargetVerificationRunner:
         state.committed_structured_tokens += 1
         if state.accepted_logprobs is not None:
             packed = pack_sample_logprobs(
-                sample.probs,
-                sample.token_id,
+                target_probs,
+                draft_token_id,
                 state.session.sampling.logprobs,
             )
             assert packed is not None
@@ -1143,23 +1164,39 @@ class VllmTargetVerificationRunner:
         )
         state.committed_structured_tokens = 0
 
-    def _sample_query_result(
+    def _query_result_probs(
         self,
         state: _ProposalVerificationState,
         chunk: EngineChunkResult,
-    ):
+    ) -> torch.Tensor:
         logits = _logits_from_packed_logprobs(chunk.logprobs[0], self.vocab_size)
         masked_logits = apply_structured_output_mask(
             logits,
             state.session.structured_output_session,
         )
         prefix_token_ids = state.current_prefix_token_ids()
-        return sample_from_logits(
+        return probs_from_logits(
             masked_logits,
             state.session.sampling,
             prompt_token_ids=prefix_token_ids[: state.session.prompt_len],
             output_token_ids=prefix_token_ids[state.session.prompt_len :],
-            generator=state.session.generator,
             suppress_stops=len(prefix_token_ids) - state.session.prompt_len
             < state.session.sampling.min_tokens,
+        )
+
+    def _sample_query_result(
+        self,
+        state: _ProposalVerificationState,
+        chunk: EngineChunkResult,
+    ) -> SampleResult:
+        probs = self._query_result_probs(state, chunk)
+        token_id = sample_from_probs(
+            probs,
+            generator=state.session.generator,
+            greedy=state.session.sampling.temperature <= 0,
+        )
+        return SampleResult(
+            token_id=token_id,
+            token_prob=float(probs[token_id].item()),
+            probs=probs,
         )
