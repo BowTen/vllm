@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.spec_decode.distributed.protocol import PackedLogprobs
 
 
@@ -17,11 +17,6 @@ def pack_sample_logprobs(
 ) -> PackedLogprobs | None:
     if num_logprobs is None:
         return None
-    if num_logprobs < 0:
-        raise NotImplementedError(
-            "Distributed draft-model speculative decoding does not support "
-            "logprobs=-1 yet."
-        )
 
     probs = probs.to(dtype=torch.float32)
     total = float(probs.sum().item())
@@ -36,7 +31,10 @@ def pack_sample_logprobs(
         int(torch.count_nonzero(log_probs > sampled_logprob).item()) + 1
     )
 
-    top_k = min(num_logprobs, probs.numel())
+    if num_logprobs == -1:
+        top_k = probs.numel()
+    else:
+        top_k = min(num_logprobs, probs.numel())
     top_logprobs, top_token_ids = torch.topk(log_probs, k=top_k)
     return PackedLogprobs(
         token_ids=[sampled_token_id] + top_token_ids.tolist(),
@@ -58,5 +56,29 @@ def build_logprobs_lists(
         sampled_token_ranks=np.asarray(
             [entry.sampled_token_rank for entry in entries],
             dtype=np.int32,
+        ),
+    )
+
+
+def build_logprobs_tensors(
+    entries: list[PackedLogprobs],
+) -> LogprobsTensors | None:
+    if not entries:
+        return None
+    return LogprobsTensors(
+        logprob_token_ids=torch.tensor(
+            [entry.token_ids for entry in entries],
+            dtype=torch.int32,
+            device="cpu",
+        ),
+        logprobs=torch.tensor(
+            [entry.logprobs for entry in entries],
+            dtype=torch.float32,
+            device="cpu",
+        ),
+        selected_token_ranks=torch.tensor(
+            [entry.sampled_token_rank for entry in entries],
+            dtype=torch.int32,
+            device="cpu",
         ),
     )

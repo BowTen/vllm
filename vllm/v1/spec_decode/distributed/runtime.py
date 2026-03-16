@@ -13,7 +13,18 @@ from transformers import AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
 
 from vllm.logger import init_logger
-from vllm.v1.spec_decode.distributed.protocol import DraftProposal, SamplingMetadata
+from vllm.v1.spec_decode.distributed.logprobs import pack_sample_logprobs
+from vllm.v1.spec_decode.distributed.protocol import (
+    DraftProposal,
+    PackedLogprobs,
+    SamplingMetadata,
+)
+from vllm.v1.spec_decode.distributed.structured_output import (
+    StructuredOutputSession,
+    accept_structured_output_tokens,
+    apply_structured_output_mask,
+    rollback_structured_output_tokens,
+)
 from vllm.v1.spec_decode.distributed.sampling import (
     SampleResult,
     is_terminal_token,
@@ -121,11 +132,12 @@ class BaseCausalLMRuntime:
         prompt_len: int,
         sampling: SamplingMetadata,
         generator: torch.Generator,
+        logits: torch.Tensor | None = None,
     ) -> SampleResult:
         output_token_ids = state.token_ids[prompt_len:]
         suppress_stops = len(output_token_ids) < sampling.min_tokens
         return sample_from_logits(
-            state.next_logits,
+            state.next_logits if logits is None else logits,
             sampling,
             prompt_token_ids=state.token_ids[:prompt_len],
             output_token_ids=output_token_ids,
@@ -150,12 +162,38 @@ class BaseCausalLMRuntime:
     def build_runtime_state(
         self, token_ids: list[int]
     ) -> IncrementalRuntimeState:
-        cache, next_logits = self._run_tokens(token_ids, cache=None)
-        return IncrementalRuntimeState(
+        state, _ = self.prefill_runtime_state(token_ids)
+        return state
+
+    def prefill_runtime_state(
+        self,
+        token_ids: list[int],
+        num_prompt_logprobs: int | None = None,
+    ) -> tuple[IncrementalRuntimeState, list[PackedLogprobs]]:
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
+        inputs = torch.tensor([token_ids], device=self.device, dtype=torch.long)
+        with torch.inference_mode():
+            outputs = self.model(input_ids=inputs, use_cache=True)
+        logits = outputs.logits[0].detach()
+        next_cache = normalize_runtime_cache(outputs.past_key_values)
+        state = IncrementalRuntimeState(
             token_ids=list(token_ids),
-            cache=cache,
-            next_logits=next_logits,
+            cache=next_cache,
+            next_logits=logits[-1],
         )
+        prompt_logprobs: list[PackedLogprobs] = []
+        if num_prompt_logprobs is not None and len(token_ids) > 1:
+            prompt_probs = torch.softmax(logits[:-1], dim=-1)
+            for position, sampled_token_id in enumerate(token_ids[1:]):
+                packed = pack_sample_logprobs(
+                    prompt_probs[position],
+                    sampled_token_id,
+                    num_prompt_logprobs,
+                )
+                assert packed is not None
+                prompt_logprobs.append(packed)
+        return state, prompt_logprobs
 
     def sync_runtime_state(
         self,
@@ -262,6 +300,7 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
         prompt_len: int,
         sampling: SamplingMetadata,
         generator: torch.Generator,
+        structured_output_session: StructuredOutputSession | None = None,
     ) -> DraftProposalOutput:
         async with self._lock:
             return await asyncio.to_thread(
@@ -273,6 +312,7 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
                 prompt_len,
                 sampling,
                 generator,
+                structured_output_session,
             )
 
     def _propose_sync(
@@ -284,6 +324,7 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
         prompt_len: int,
         sampling: SamplingMetadata,
         generator: torch.Generator,
+        structured_output_session: StructuredOutputSession | None = None,
     ) -> DraftProposalOutput:
         draft_token_ids: list[int] = []
         draft_token_probs: list[float] = []
@@ -302,17 +343,37 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
         )
         self._sessions[session_id] = runtime_state
         temp_state = self.clone_runtime_state(runtime_state)
-        for _ in range(max_steps):
-            result = self.sample_next_token_from_state(
-                temp_state, prompt_len, sampling, generator
+        structured_advances = 0
+        try:
+            for _ in range(max_steps):
+                masked_logits = apply_structured_output_mask(
+                    temp_state.next_logits,
+                    structured_output_session,
+                )
+                result = self.sample_next_token_from_state(
+                    temp_state,
+                    prompt_len,
+                    sampling,
+                    generator,
+                    logits=masked_logits,
+                )
+                draft_token_ids.append(result.token_id)
+                draft_token_probs.append(result.token_prob)
+                accept_structured_output_tokens(
+                    structured_output_session,
+                    [result.token_id],
+                )
+                structured_advances += 1
+                self.advance_runtime_state(temp_state, result.token_id)
+                output_len_after = len(temp_state.token_ids) - prompt_len
+                if is_terminal_token(result.token_id, sampling, output_len_after):
+                    stopped = True
+                    break
+        finally:
+            rollback_structured_output_tokens(
+                structured_output_session,
+                structured_advances,
             )
-            draft_token_ids.append(result.token_id)
-            draft_token_probs.append(result.token_prob)
-            self.advance_runtime_state(temp_state, result.token_id)
-            output_len_after = len(temp_state.token_ids) - prompt_len
-            if is_terminal_token(result.token_id, sampling, output_len_after):
-                stopped = True
-                break
 
         return DraftProposalOutput(
             proposal=DraftProposal(

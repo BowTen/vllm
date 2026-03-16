@@ -10,6 +10,7 @@ import msgspec
 
 if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.structured_output.backend_types import StructuredOutputKey
 
 
 class SamplingMetadata(
@@ -33,10 +34,42 @@ class SamplingMetadata(
     logit_bias: dict[int, float] | None = None
     allowed_token_ids: list[int] | None = None
     logprobs: int | None = None
+    prompt_logprobs: int | None = None
     bad_words_token_ids: list[list[int]] | None = None
+    structured_output_backend: str | None = None
+    structured_output_type: str | None = None
+    structured_output_spec: str | None = None
+    structured_output_disable_any_whitespace: bool = False
+    structured_output_disable_additional_properties: bool = False
+    structured_output_max_rollback: int = 0
 
     @classmethod
     def from_sampling_params(cls, params: "SamplingParams") -> "SamplingMetadata":
+        structured_output_backend = None
+        structured_output_type = None
+        structured_output_spec = None
+        structured_output_disable_any_whitespace = False
+        structured_output_disable_additional_properties = False
+        if params.structured_outputs is not None and not params.structured_outputs.all_constraints_none():
+            from vllm.v1.structured_output.request import get_structured_output_key
+
+            if params.structured_outputs._backend is None:
+                raise ValueError(
+                    "Structured outputs backend was not resolved before "
+                    "distributed speculative request creation."
+                )
+            key: StructuredOutputKey = get_structured_output_key(
+                params.structured_outputs
+            )
+            structured_output_backend = params.structured_outputs._backend
+            structured_output_type = key[0].name
+            structured_output_spec = key[1]
+            structured_output_disable_any_whitespace = (
+                params.structured_outputs.disable_any_whitespace
+            )
+            structured_output_disable_additional_properties = (
+                params.structured_outputs.disable_additional_properties
+            )
         return cls(
             temperature=params.temperature,
             top_p=params.top_p,
@@ -54,7 +87,17 @@ class SamplingMetadata(
             logit_bias=params.logit_bias,
             allowed_token_ids=params.allowed_token_ids,
             logprobs=params.logprobs,
+            prompt_logprobs=params.prompt_logprobs,
             bad_words_token_ids=params.bad_words_token_ids,
+            structured_output_backend=structured_output_backend,
+            structured_output_type=structured_output_type,
+            structured_output_spec=structured_output_spec,
+            structured_output_disable_any_whitespace=(
+                structured_output_disable_any_whitespace
+            ),
+            structured_output_disable_additional_properties=(
+                structured_output_disable_additional_properties
+            ),
         )
 
     def to_jsonable(self) -> dict[str, Any]:
@@ -75,7 +118,18 @@ class SamplingMetadata(
             "logit_bias": self.logit_bias,
             "allowed_token_ids": self.allowed_token_ids,
             "logprobs": self.logprobs,
+            "prompt_logprobs": self.prompt_logprobs,
             "bad_words_token_ids": self.bad_words_token_ids,
+            "structured_output_backend": self.structured_output_backend,
+            "structured_output_type": self.structured_output_type,
+            "structured_output_spec": self.structured_output_spec,
+            "structured_output_disable_any_whitespace": (
+                self.structured_output_disable_any_whitespace
+            ),
+            "structured_output_disable_additional_properties": (
+                self.structured_output_disable_additional_properties
+            ),
+            "structured_output_max_rollback": self.structured_output_max_rollback,
         }
 
 
@@ -108,6 +162,7 @@ class OpenSessionResponse(
     session_id: str
     session_version: int = 0
     vocab_size: int | None = None
+    prompt_logprobs: list[PackedLogprobs] = msgspec.field(default_factory=list)
 
 
 class DraftProposal(

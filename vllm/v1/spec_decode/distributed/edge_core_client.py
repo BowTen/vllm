@@ -25,7 +25,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.executor import Executor
 from vllm.v1.spec_decode.distributed.edge_session import (
@@ -43,6 +43,7 @@ from vllm.v1.spec_decode.distributed.protocol import (
     VerificationResult,
 )
 from vllm.v1.spec_decode.distributed.runtime import EdgeDraftRunner
+from vllm.v1.spec_decode.distributed.structured_output import StructuredOutputFactory
 
 logger = init_logger(__name__)
 
@@ -135,7 +136,23 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
             self.speculative_config.verifier_url,
             self.speculative_config.verifier_timeout_s,
         )
-        self._session_core = EdgeSessionCore(self._draft_runner, self._verifier)
+        self._structured_output_factory: StructuredOutputFactory | None = None
+        structured_output_factory = None
+        draft_model_config = getattr(self.speculative_config, "draft_model_config", None)
+        if draft_model_config is not None:
+            self._structured_output_factory = StructuredOutputFactory(
+                model_name=draft_model_config.model,
+                trust_remote_code=draft_model_config.trust_remote_code,
+                num_speculative_tokens=self.speculative_config.num_speculative_tokens,
+                vocab_size=self._draft_runner.vocab_size,
+            )
+            structured_output_factory = self._structured_output_factory
+        self._session_core = EdgeSessionCore(
+            self._draft_runner,
+            self._verifier,
+            structured_output_factory=structured_output_factory,
+            num_speculative_tokens=self.speculative_config.num_speculative_tokens,
+        )
         if self._sync_mode:
             self._sync_outputs = queue.Queue()
             self._start_background_loop()
@@ -359,6 +376,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
                     request.request_id,
                     step.new_token_ids,
                     new_logprobs=step.new_logprobs,
+                    new_prompt_logprobs_tensors=step.new_prompt_logprobs_tensors,
                     finish_reason=step.finish_reason,
                     stop_reason=step.stop_reason,
                 )
@@ -391,6 +409,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
         request_id: str,
         new_token_ids: list[int],
         new_logprobs: LogprobsLists | None = None,
+        new_prompt_logprobs_tensors: LogprobsTensors | None = None,
         finish_reason: FinishReason | None = None,
         stop_reason: int | str | None = None,
     ) -> None:
@@ -401,6 +420,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
                         request_id=request_id,
                         new_token_ids=new_token_ids,
                         new_logprobs=new_logprobs,
+                        new_prompt_logprobs_tensors=new_prompt_logprobs_tensors,
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
                     )
@@ -421,7 +441,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
-        self._session_core.clear_local_state()
+        self._session_core.shutdown()
         await self._verifier.close()
 
     def _cancel_request_tasks(self, request_ids: list[str]) -> None:
@@ -483,18 +503,16 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
             )
         params = request.sampling_params
         assert isinstance(params, SamplingParams)
-        if params.prompt_logprobs is not None:
-            raise NotImplementedError(
-                "Distributed draft-model speculative decoding does not support "
-                "prompt_logprobs yet."
-            )
-        if params.logprobs == -1:
-            raise NotImplementedError(
-                "Distributed draft-model speculative decoding does not support "
-                "logprobs=-1 yet."
-            )
-        if params.structured_outputs is not None:
-            raise NotImplementedError(
-                "Distributed draft-model speculative decoding does not support "
-                "structured outputs yet."
+        if (
+            params.structured_outputs is not None
+            and not params.structured_outputs.all_constraints_none()
+        ):
+            if self._structured_output_factory is None:
+                raise NotImplementedError(
+                    "Distributed draft-model speculative decoding requires a "
+                    "local draft model config to use structured outputs."
+                )
+            self._structured_output_factory.resolve_sampling_params(
+                params,
+                getattr(self.vllm_config, "structured_outputs_config", None),
             )

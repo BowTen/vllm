@@ -10,9 +10,10 @@ from typing import AsyncIterator, Protocol
 import torch
 
 from vllm.v1.engine import EngineCoreRequest, FinishReason
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.spec_decode.distributed.logprobs import (
     build_logprobs_lists,
+    build_logprobs_tensors,
     pack_sample_logprobs,
 )
 from vllm.v1.spec_decode.distributed.protocol import (
@@ -27,6 +28,11 @@ from vllm.v1.spec_decode.distributed.protocol import (
     VerificationResult,
 )
 from vllm.v1.spec_decode.distributed.runtime import EdgeDraftRunner, deserialize_probs
+from vllm.v1.spec_decode.distributed.structured_output import (
+    StructuredOutputFactory,
+    StructuredOutputSession,
+    accept_structured_output_tokens,
+)
 from vllm.v1.spec_decode.distributed.sampling import (
     is_terminal_token,
     sample_from_probs,
@@ -59,6 +65,7 @@ class EdgeSessionState:
     sampling: SamplingMetadata
     generator: torch.Generator
     accepted_prefix_token_ids: list[int]
+    structured_output_session: StructuredOutputSession | None = None
     version: int = 0
     proposal_id: int = 0
 
@@ -68,6 +75,7 @@ class EdgeStepResult:
     request_id: str
     new_token_ids: list[int]
     new_logprobs: LogprobsLists | None = None
+    new_prompt_logprobs_tensors: LogprobsTensors | None = None
     finish_reason: FinishReason | None = None
     stop_reason: int | str | None = None
 
@@ -97,9 +105,13 @@ class EdgeSessionCore:
         self,
         draft_runner: EdgeDraftRunner,
         verifier: VerifierClient,
+        structured_output_factory: StructuredOutputFactory | None = None,
+        num_speculative_tokens: int = 0,
     ) -> None:
         self._draft_runner = draft_runner
         self._verifier = verifier
+        self._structured_output_factory = structured_output_factory
+        self._num_speculative_tokens = num_speculative_tokens
         self.registry = EdgeSessionRegistry()
 
     def create_session(self, request: EngineCoreRequest) -> EdgeSessionState:
@@ -114,12 +126,21 @@ class EdgeSessionCore:
             seed = torch.seed()
         generator = torch.Generator(device="cpu")
         generator.manual_seed(int(seed))
+        sampling.structured_output_max_rollback = self._num_speculative_tokens
         session = EdgeSessionState(
             request_id=request.request_id,
             prompt_len=len(request.prompt_token_ids),
             sampling=sampling,
             generator=generator,
             accepted_prefix_token_ids=list(request.prompt_token_ids),
+            structured_output_session=(
+                self._structured_output_factory.create_session(
+                    request.request_id,
+                    sampling,
+                )
+                if self._structured_output_factory is not None
+                else None
+            ),
         )
         self.registry.add(session)
         return session
@@ -145,6 +166,13 @@ class EdgeSessionCore:
                 "Draft and verifier vocab sizes differ: "
                 f"{self._draft_runner.vocab_size} != {response.vocab_size}."
             )
+        prompt_logprobs_tensors = build_logprobs_tensors(response.prompt_logprobs)
+        if prompt_logprobs_tensors is not None:
+            yield EdgeStepResult(
+                request_id=request.request_id,
+                new_token_ids=[],
+                new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+            )
 
         while True:
             finish_reason = self._maybe_finish_without_new_tokens(session)
@@ -164,6 +192,7 @@ class EdgeSessionCore:
                 prompt_len=session.prompt_len,
                 sampling=session.sampling,
                 generator=session.generator,
+                structured_output_session=session.structured_output_session,
             )
             proposal = proposal_output.proposal
             if not proposal.draft_token_ids:
@@ -218,6 +247,11 @@ class EdgeSessionCore:
     def clear_local_state(self) -> None:
         self.registry.clear()
         self._draft_runner.clear_sessions()
+
+    def shutdown(self) -> None:
+        self.clear_local_state()
+        if self._structured_output_factory is not None:
+            self._structured_output_factory.close()
 
     def _apply_verification_result(
         self,
@@ -286,6 +320,7 @@ class EdgeSessionCore:
             )
         )
         session.accepted_prefix_token_ids.extend(emitted)
+        accept_structured_output_tokens(session.structured_output_session, emitted)
         session.version += len(emitted)
         return emitted, emitted_logprobs, finish_reason, stop_reason, needs_resync
 

@@ -186,6 +186,15 @@ The first milestone should focus on:
 - correct accepted-prefix behavior
 - correct structured outputs
 
+Implementation update:
+
+- for distributed draft-model speculative decoding, structured outputs are
+  compiled independently on edge and verifier via a lightweight local factory
+  that reuses the existing V1 backend implementations
+- this avoids depending on the V1 scheduler-side `StructuredOutputManager`,
+  which is tied to the native engine path and is not directly reusable by the
+  separate verifier service
+
 It should not initially optimize:
 
 - verifier batch scheduling quality

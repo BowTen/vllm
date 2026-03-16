@@ -23,6 +23,15 @@ class FakeRuntime(BaseCausalLMRuntime):
         self.device = torch.device("cpu")
         self.processed_chunks: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
 
+    def prefill_runtime_state(
+        self,
+        token_ids: list[int],
+        num_prompt_logprobs: int | None = None,
+    ):
+        del num_prompt_logprobs
+        cache, next_logits = self._run_tokens(token_ids, cache=None)
+        return self._build_state(token_ids, cache, next_logits), []
+
     def _run_tokens(
         self,
         token_ids: list[int],
@@ -36,6 +45,15 @@ class FakeRuntime(BaseCausalLMRuntime):
             dtype=torch.float32,
         )
         return FakeCache(full_sequence), next_logits
+
+    def _build_state(self, token_ids, cache, next_logits):
+        from vllm.v1.spec_decode.distributed.runtime import IncrementalRuntimeState
+
+        return IncrementalRuntimeState(
+            token_ids=list(token_ids),
+            cache=cache,
+            next_logits=next_logits,
+        )
 
 
 def test_sync_runtime_state_reuses_matching_prefix():

@@ -30,6 +30,7 @@ def make_request(
     request_id: str = "request-1",
     max_tokens: int = 5,
     logprobs: int | None = None,
+    prompt_logprobs: int | None = None,
 ) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=request_id,
@@ -41,6 +42,7 @@ def make_request(
             temperature=0.0,
             seed=7,
             logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
         ),
         pooling_params=None,
         arrival_time=time.time(),
@@ -65,8 +67,9 @@ class FakeDraftRunner:
         prompt_len: int,
         sampling: Any,
         generator: torch.Generator,
+        structured_output_session: Any | None = None,
     ) -> DraftProposalOutput:
-        del prompt_len, sampling, generator
+        del prompt_len, sampling, generator, structured_output_session
         proposal_tokens = {
             0: ([11, 12], False),
             1: ([13], False),
@@ -102,10 +105,30 @@ class FakeVerifierClient:
         request: OpenSessionRequest,
     ) -> OpenSessionResponse:
         self.calls.append(("open_session", request.session_id))
+        prompt_logprobs = []
+        if request.sampling_metadata.prompt_logprobs is not None:
+            probs_2 = torch.zeros(FakeDraftRunner.vocab_size, dtype=torch.float32)
+            probs_2[2] = 1.0
+            probs_3 = torch.zeros(FakeDraftRunner.vocab_size, dtype=torch.float32)
+            probs_3[3] = 1.0
+            packed_2 = pack_sample_logprobs(
+                probs_2,
+                2,
+                request.sampling_metadata.prompt_logprobs,
+            )
+            packed_3 = pack_sample_logprobs(
+                probs_3,
+                3,
+                request.sampling_metadata.prompt_logprobs,
+            )
+            assert packed_2 is not None
+            assert packed_3 is not None
+            prompt_logprobs = [packed_2, packed_3]
         return OpenSessionResponse(
             session_id=request.session_id,
             session_version=request.initial_version,
             vocab_size=FakeDraftRunner.vocab_size,
+            prompt_logprobs=prompt_logprobs,
         )
 
     async def verify_proposal(
@@ -242,3 +265,26 @@ async def test_edge_session_core_emits_logprobs_for_verified_tokens():
     assert steps[0].new_logprobs.logprob_token_ids.shape == (3, 2)
     assert steps[1].new_logprobs.logprob_token_ids.tolist() == [[77, 77]]
     assert steps[2].new_logprobs.logprob_token_ids.tolist() == [[88, 88]]
+
+
+@pytest.mark.asyncio
+async def test_edge_session_core_emits_prompt_logprobs_before_decode_steps():
+    request = make_request(
+        request_id="request-prompt-logprobs",
+        max_tokens=5,
+        prompt_logprobs=1,
+    )
+    draft_runner = FakeDraftRunner()
+    verifier = FakeVerifierClient()
+    core = EdgeSessionCore(draft_runner, verifier)
+
+    session = core.create_session(request)
+    steps = [step async for step in core.run_request(request, session)]
+
+    assert steps[0].new_token_ids == []
+    assert steps[0].new_prompt_logprobs_tensors is not None
+    assert steps[0].new_prompt_logprobs_tensors.logprob_token_ids.tolist() == [
+        [2, 2],
+        [3, 3],
+    ]
+    assert [step.new_token_ids for step in steps[1:]] == [[11, 12, 99], [77], [88]]

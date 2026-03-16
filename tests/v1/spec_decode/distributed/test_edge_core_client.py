@@ -14,6 +14,7 @@ import torch
 import uvicorn
 
 from vllm import SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.entrypoints.spec_decode import verifier_server as verifier_server_mod
 from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -29,6 +30,7 @@ from vllm.v1.spec_decode.distributed.runtime import (
     DraftProposalOutput,
     serialize_probs,
 )
+from vllm.v1.spec_decode.distributed.structured_output import StructuredOutputSession
 
 
 def find_free_port() -> int:
@@ -41,6 +43,8 @@ def make_request(
     request_id: str = "request-1",
     max_tokens: int = 5,
     logprobs: int | None = None,
+    prompt_logprobs: int | None = None,
+    structured_outputs: StructuredOutputsParams | None = None,
 ) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=request_id,
@@ -52,6 +56,8 @@ def make_request(
             temperature=0.0,
             seed=7,
             logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
+            structured_outputs=structured_outputs,
         ),
         pooling_params=None,
         arrival_time=time.time(),
@@ -62,17 +68,48 @@ def make_request(
 
 
 class FakeSpeculativeConfig:
-    def __init__(self, verifier_url: str, verifier_timeout_s: float = 5.0):
+    def __init__(
+        self,
+        verifier_url: str,
+        verifier_timeout_s: float = 5.0,
+        num_speculative_tokens: int = 2,
+        draft_model_config: Any | None = None,
+    ):
         self.verifier_url = verifier_url
         self.verifier_timeout_s = verifier_timeout_s
+        self.num_speculative_tokens = num_speculative_tokens
+        self.draft_model_config = draft_model_config
 
     def uses_distributed_draft_model(self) -> bool:
         return True
 
 
-def make_fake_vllm_config(base_url: str) -> SimpleNamespace:
+def make_fake_vllm_config(
+    base_url: str,
+    *,
+    with_draft_model: bool = False,
+    structured_outputs_backend: str | None = None,
+) -> SimpleNamespace:
+    draft_model_config = None
+    if with_draft_model:
+        draft_model_config = SimpleNamespace(
+            model="fake-model",
+            trust_remote_code=False,
+        )
     return SimpleNamespace(
-        speculative_config=FakeSpeculativeConfig(base_url),
+        speculative_config=FakeSpeculativeConfig(
+            base_url,
+            draft_model_config=draft_model_config,
+        ),
+        structured_outputs_config=(
+            SimpleNamespace(
+                backend=structured_outputs_backend,
+                disable_any_whitespace=False,
+                disable_additional_properties=False,
+            )
+            if structured_outputs_backend is not None
+            else None
+        ),
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
             data_parallel_external_lb=False,
@@ -85,6 +122,7 @@ class FakeDraftRunner:
 
     def __init__(self, _vllm_config: Any) -> None:
         self.closed_sessions: list[str] = []
+        self.structured_output_sessions: list[Any | None] = []
 
     async def propose(
         self,
@@ -95,8 +133,10 @@ class FakeDraftRunner:
         prompt_len: int,
         sampling: Any,
         generator: torch.Generator,
+        structured_output_session: Any | None = None,
     ) -> DraftProposalOutput:
         del sampling, generator
+        self.structured_output_sessions.append(structured_output_session)
         proposal_tokens = {
             0: ([11, 12], False),
             1: ([13], False),
@@ -138,11 +178,33 @@ def _make_fake_target_runner(call_log: list[tuple[str, Any]]) -> type:
 
         async def open_session(self, request) -> OpenSessionResponse:
             self.sessions[request.session_id] = list(request.prompt_token_ids)
-            call_log.append(("open_session", request.session_id))
+            call_log.append(
+                (
+                    "open_session",
+                    request.session_id,
+                    request.sampling_metadata.structured_output_backend,
+                )
+            )
+            prompt_logprobs = []
+            if request.sampling_metadata.prompt_logprobs is not None:
+                probs_2 = torch.zeros(self.vocab_size, dtype=torch.float32)
+                probs_2[2] = 1.0
+                probs_3 = torch.zeros(self.vocab_size, dtype=torch.float32)
+                probs_3[3] = 1.0
+                packed_2 = pack_sample_logprobs(
+                    probs_2, 2, request.sampling_metadata.prompt_logprobs
+                )
+                packed_3 = pack_sample_logprobs(
+                    probs_3, 3, request.sampling_metadata.prompt_logprobs
+                )
+                assert packed_2 is not None
+                assert packed_3 is not None
+                prompt_logprobs = [packed_2, packed_3]
             return OpenSessionResponse(
                 session_id=request.session_id,
                 session_version=request.initial_version,
                 vocab_size=self.vocab_size,
+                prompt_logprobs=prompt_logprobs,
             )
 
         async def close_session(self, request) -> None:
@@ -399,3 +461,155 @@ def test_distributed_client_streams_logprobs_from_verifier(
     ]
     assert outputs[1].new_logprobs is not None
     assert outputs[1].new_logprobs.logprob_token_ids.tolist() == [[77, 77]]
+
+
+def test_distributed_client_streams_prompt_logprobs_from_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+    verifier_server,
+) -> None:
+    base_url, _call_log = verifier_server
+    monkeypatch.setattr(edge_client_mod, "EdgeDraftRunner", FakeDraftRunner)
+    client = EngineCoreClient.make_client(
+        multiprocess_mode=True,
+        asyncio_mode=False,
+        vllm_config=make_fake_vllm_config(base_url),
+        executor_class=object,
+        log_stats=False,
+    )
+    try:
+        client.add_request(
+            make_request(
+                request_id="request-prompt-logprobs",
+                prompt_logprobs=1,
+            )
+        )
+        outputs = _collect_outputs_sync_detailed(client)
+    finally:
+        client.shutdown()
+
+    assert outputs[0].new_token_ids == []
+    assert outputs[0].new_prompt_logprobs_tensors is not None
+    assert outputs[0].new_prompt_logprobs_tensors.logprob_token_ids.tolist() == [
+        [2, 2],
+        [3, 3],
+    ]
+    assert [output.new_token_ids for output in outputs[1:]] == [
+        [11, 12, 99],
+        [77],
+        [88],
+    ]
+
+
+class FakeStructuredOutputFactory:
+    def __init__(
+        self,
+        model_name: str,
+        trust_remote_code: bool,
+        *,
+        num_speculative_tokens: int = 0,
+        **_: Any,
+    ) -> None:
+        self.model_name = model_name
+        self.trust_remote_code = trust_remote_code
+        self.num_speculative_tokens = num_speculative_tokens
+        self.closed = False
+        self.created_sessions: list[StructuredOutputSession] = []
+        self.resolve_calls: list[str] = []
+
+    def resolve_sampling_params(self, params: SamplingParams, structured_outputs_config: Any) -> None:
+        assert structured_outputs_config is not None
+        assert params.structured_outputs is not None
+        params.structured_outputs._backend = structured_outputs_config.backend
+        self.resolve_calls.append(structured_outputs_config.backend)
+
+    def create_session(
+        self,
+        request_id: str,
+        sampling: Any,
+    ) -> StructuredOutputSession | None:
+        if sampling.structured_output_backend is None:
+            return None
+        session = StructuredOutputSession(
+            request_id=request_id,
+            grammar=FakeStructuredOutputGrammar(),
+            bitmask=torch.zeros((1, 2), dtype=torch.int32),
+        )
+        self.created_sessions.append(session)
+        return session
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeStructuredOutputGrammar:
+    def __init__(self) -> None:
+        self.accepted: list[int] = []
+
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        del request_id
+        self.accepted.extend(tokens)
+        return True
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        return list(tokens)
+
+    def rollback(self, num_tokens: int) -> None:
+        if num_tokens > 0:
+            del self.accepted[-num_tokens:]
+
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        bitmask[batch_index].fill_(-1)
+
+    def is_terminated(self) -> bool:
+        return False
+
+    def reset(self) -> None:
+        self.accepted = []
+
+
+def test_distributed_client_supports_structured_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    verifier_server,
+) -> None:
+    base_url, call_log = verifier_server
+    monkeypatch.setattr(edge_client_mod, "EdgeDraftRunner", FakeDraftRunner)
+    monkeypatch.setattr(
+        edge_client_mod,
+        "StructuredOutputFactory",
+        FakeStructuredOutputFactory,
+    )
+    client = EngineCoreClient.make_client(
+        multiprocess_mode=True,
+        asyncio_mode=False,
+        vllm_config=make_fake_vllm_config(
+            base_url,
+            with_draft_model=True,
+            structured_outputs_backend="outlines",
+        ),
+        executor_class=object,
+        log_stats=False,
+    )
+    fake_factory = client._structured_output_factory
+    assert isinstance(fake_factory, FakeStructuredOutputFactory)
+    try:
+        client.add_request(
+            make_request(
+                request_id="request-structured",
+                max_tokens=5,
+                structured_outputs=StructuredOutputsParams(choice=["yes", "no"]),
+            )
+        )
+        tokens, finish_reason = _collect_outputs_sync(client)
+    finally:
+        draft_runner = client._draft_runner
+        client.shutdown()
+
+    assert tokens == [11, 12, 99, 77, 88]
+    assert finish_reason == FinishReason.LENGTH
+    assert fake_factory.resolve_calls == ["outlines"]
+    assert len(fake_factory.created_sessions) == 1
+    assert fake_factory.created_sessions[0].request_id == "request-structured"
+    assert draft_runner.structured_output_sessions == fake_factory.created_sessions * 3
+    assert fake_factory.created_sessions[0].grammar.accepted == [11, 12, 99, 77, 88]
+    assert call_log[0] == ("open_session", "request-structured", "outlines")
+    assert fake_factory.closed

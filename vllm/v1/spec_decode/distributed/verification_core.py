@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -221,3 +222,8 @@ class VerificationCore:
 
     async def shutdown(self) -> None:
         await self.scheduler.shutdown()
+        shutdown = getattr(self.runner, "shutdown", None)
+        if callable(shutdown):
+            result = shutdown()
+            if inspect.isawaitable(result):
+                await result
