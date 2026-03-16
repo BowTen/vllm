@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import numpy as np
+import pytest
+import torch
+
+from vllm.v1.spec_decode.distributed.logprobs import (
+    build_logprobs_lists,
+    pack_sample_logprobs,
+)
+
+
+def test_pack_sample_logprobs_preserves_sampled_rank_and_top_tokens():
+    probs = torch.tensor([0.1, 0.7, 0.2], dtype=torch.float32)
+
+    packed = pack_sample_logprobs(probs, sampled_token_id=2, num_logprobs=2)
+
+    assert packed is not None
+    assert packed.token_ids == [2, 1, 2]
+    assert packed.sampled_token_rank == 2
+    assert packed.logprobs[0] == pytest.approx(np.log(0.2), rel=1e-5)
+
+
+def test_build_logprobs_lists_converts_packed_entries():
+    first = pack_sample_logprobs(
+        torch.tensor([0.6, 0.4], dtype=torch.float32),
+        sampled_token_id=0,
+        num_logprobs=1,
+    )
+    second = pack_sample_logprobs(
+        torch.tensor([0.3, 0.7], dtype=torch.float32),
+        sampled_token_id=1,
+        num_logprobs=1,
+    )
+    assert first is not None
+    assert second is not None
+
+    logprobs = build_logprobs_lists([first, second])
+
+    assert logprobs is not None
+    assert logprobs.logprob_token_ids.tolist() == [[0, 0], [1, 1]]
+    assert logprobs.sampled_token_ranks.tolist() == [1, 1]

@@ -59,6 +59,37 @@ class FakeVerificationRunner:
         )
 
 
+class BatchingFakeVerificationRunner(FakeVerificationRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls: list[list[int]] = []
+
+    async def verify_proposal(
+        self, proposal: DraftProposal
+    ) -> VerificationResult:
+        raise AssertionError(
+            f"verify_proposal should not be used for batched proposal {proposal.proposal_id}."
+        )
+
+    async def verify_proposals_batch(
+        self, proposals: list[DraftProposal]
+    ) -> list[VerificationResult]:
+        self.batch_calls.append([proposal.proposal_id for proposal in proposals])
+        await asyncio.sleep(0.01)
+        return [
+            VerificationResult(
+                session_id=proposal.session_id,
+                proposal_id=proposal.proposal_id,
+                base_version=proposal.base_version,
+                accepted_len=len(proposal.draft_token_ids),
+                accepted_token_ids=list(proposal.draft_token_ids),
+                verifier_version=proposal.base_version
+                + len(proposal.draft_token_ids),
+            )
+            for proposal in proposals
+        ]
+
+
 @pytest.mark.asyncio
 async def test_verification_core_tracks_sessions_and_serializes_proposals():
     runner = FakeVerificationRunner()
@@ -125,4 +156,64 @@ async def test_verification_core_tracks_sessions_and_serializes_proposals():
 
     await core.close_session(CloseSessionRequest(session_id=session_id))
     assert not core.registry.has(session_id)
+    await core.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_verification_core_batches_ready_proposals_across_sessions():
+    runner = BatchingFakeVerificationRunner()
+    core = VerificationCore(
+        runner,
+        scheduler_max_batch_size=4,
+        scheduler_batch_wait_ms=5.0,
+    )
+
+    sampling = SamplingMetadata(
+        temperature=0.0,
+        top_p=1.0,
+        top_k=0,
+        min_p=0.0,
+        presence_penalty=0.0,
+        frequency_penalty=0.0,
+        repetition_penalty=1.0,
+    )
+    for session_id in ("session-a", "session-b"):
+        await core.open_session(
+            OpenSessionRequest(
+                session_id=session_id,
+                prompt_token_ids=[1, 2, 3],
+                sampling_metadata=sampling,
+                initial_version=0,
+            )
+        )
+
+    proposal_a = DraftProposal(
+        session_id="session-a",
+        proposal_id=0,
+        base_version=0,
+        accepted_prefix_len=3,
+        draft_token_ids=[10],
+        draft_token_probs=[1.0],
+    )
+    proposal_b = DraftProposal(
+        session_id="session-b",
+        proposal_id=1,
+        base_version=0,
+        accepted_prefix_len=3,
+        draft_token_ids=[11],
+        draft_token_probs=[1.0],
+    )
+    result_a, result_b = await asyncio.gather(
+        core.verify_proposal(proposal_a),
+        core.verify_proposal(proposal_b),
+    )
+
+    assert result_a.accepted_token_ids == [10]
+    assert result_b.accepted_token_ids == [11]
+    assert runner.batch_calls == [[0, 1]]
+    assert core.registry.get("session-a").version == 1
+    assert core.registry.get("session-b").version == 1
+
+    await core.close_session(CloseSessionRequest(session_id="session-a"))
+    await core.close_session(CloseSessionRequest(session_id="session-b"))
     await core.shutdown()

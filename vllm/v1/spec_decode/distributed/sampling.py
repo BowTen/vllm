@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.v1.sample.ops.bad_words import _apply_bad_words_single_batch
 from vllm.v1.spec_decode.distributed.protocol import SamplingMetadata
 
 _NEG_INF = torch.finfo(torch.float32).min
@@ -108,6 +109,10 @@ def apply_sampling_transforms(
         allowed[allow_ids] = logits[allow_ids]
         logits = allowed
 
+    if sampling.bad_words_token_ids:
+        _apply_bad_words_single_batch(logits, sampling.bad_words_token_ids,
+                                      output_token_ids)
+
     if sampling.temperature > 0:
         logits = logits / sampling.temperature
 
@@ -128,24 +133,19 @@ def sample_from_logits(
     if suppress_stops:
         suppress_terminal_tokens(transformed, sampling)
 
-    if sampling.temperature <= 0:
-        token_id = int(torch.argmax(transformed).item())
-        probs = torch.zeros_like(transformed)
-        probs[token_id] = 1.0
-        return SampleResult(token_id=token_id, token_prob=1.0, probs=probs)
-
+    greedy = sampling.temperature <= 0
     filtered = transformed.clone()
 
-    if sampling.min_p > 0:
+    if not greedy and sampling.min_p > 0:
         base_probs = torch.softmax(filtered, dim=-1)
         threshold = base_probs.max() * sampling.min_p
         filtered[base_probs < threshold] = _NEG_INF
 
-    if sampling.top_k > 0 and sampling.top_k < filtered.numel():
+    if not greedy and sampling.top_k > 0 and sampling.top_k < filtered.numel():
         threshold = torch.topk(filtered, sampling.top_k).values[-1]
         filtered[filtered < threshold] = _NEG_INF
 
-    if sampling.top_p < 1.0:
+    if not greedy and sampling.top_p < 1.0:
         sorted_logits, sorted_indices = torch.sort(filtered, descending=True)
         sorted_probs = torch.softmax(sorted_logits, dim=-1)
         cumulative = torch.cumsum(sorted_probs, dim=-1)
@@ -158,6 +158,14 @@ def sample_from_logits(
     if not torch.isfinite(probs).all() or float(probs.sum().item()) == 0.0:
         raise ValueError("Sampling produced an invalid probability distribution.")
 
+    if greedy:
+        token_id = int(torch.argmax(filtered).item())
+        return SampleResult(
+            token_id=token_id,
+            token_prob=float(probs[token_id].item()),
+            probs=probs,
+        )
+
     token_id = int(torch.multinomial(probs, 1, generator=generator).item())
     return SampleResult(
         token_id=token_id,
@@ -169,6 +177,8 @@ def sample_from_logits(
 def sample_from_probs(
     probs: torch.Tensor,
     generator: torch.Generator,
+    *,
+    greedy: bool = False,
 ) -> int:
     probs = probs.to(dtype=torch.float32)
     total = float(probs.sum().item())
@@ -176,4 +186,6 @@ def sample_from_probs(
         raise ValueError("Received an empty probability distribution to sample from.")
     if abs(total - 1.0) > 1e-4:
         probs = probs / total
+    if greedy:
+        return int(torch.argmax(probs).item())
     return int(torch.multinomial(probs, 1, generator=generator).item())

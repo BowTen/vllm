@@ -385,6 +385,9 @@ Responsibilities:
 - manage verifier token budget
 - coordinate proposal fairness and timeouts
 - drive target-side verification batches
+- aggregate short micro-batches even before a fully tensorized target runner
+  exists; a batch-oriented scheduler API with sequential fallback is acceptable
+  as an intermediate step
 
 ### `CloudSessionRegistry`
 
@@ -685,6 +688,13 @@ Deliverables:
 - `ProposalScheduler`
 - verifier-side batching policy
 - session queueing and fairness
+
+Implementation note:
+
+- if the first cloud runner implementation cannot yet do true tensorized
+  verification across sessions, the scheduler should still expose a
+  batch-oriented interface and micro-batch ready proposals, so the runner can be
+  upgraded later without changing the edge/cloud protocol surface
 
 ## 11.4 Phase 4: resilience and routing improvements
 

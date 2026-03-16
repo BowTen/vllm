@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.spec_decode.distributed.logprobs import pack_sample_logprobs
 from vllm.v1.spec_decode.distributed.protocol import (
     CloseSessionRequest,
     DraftProposal,
@@ -102,6 +103,16 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         async with self._lock:
             return await asyncio.to_thread(self._verify_proposal_sync, proposal)
 
+    async def verify_proposals_batch(
+        self,
+        proposals: list[DraftProposal],
+    ) -> list[VerificationResult]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._verify_proposals_batch_sync,
+                proposals,
+            )
+
     def _verify_proposal_sync(self, proposal: DraftProposal) -> VerificationResult:
         session = self._get_session(proposal.session_id)
         if proposal.base_version != session.version:
@@ -124,6 +135,9 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         session.runtime_state = runtime_state
         temp_state = self.clone_runtime_state(runtime_state)
         accepted_token_ids: list[int] = []
+        accepted_logprobs = (
+            [] if session.sampling.logprobs is not None else None
+        )
         for reject_pos, draft_token_id in enumerate(proposal.draft_token_ids):
             sample = self.sample_next_token_from_state(
                 temp_state,
@@ -145,8 +159,17 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
                     reject_pos=reject_pos,
                     target_probs_at_reject_pos=serialize_probs(sample.probs),
                     verifier_version=session.version,
+                    accepted_logprobs=accepted_logprobs or [],
                 )
             accepted_token_ids.append(draft_token_id)
+            if accepted_logprobs is not None:
+                packed = pack_sample_logprobs(
+                    sample.probs,
+                    sample.token_id,
+                    session.sampling.logprobs,
+                )
+                assert packed is not None
+                accepted_logprobs.append(packed)
             self.advance_runtime_state(temp_state, draft_token_id)
 
         session.accepted_prefix_token_ids = accepted_prefix + accepted_token_ids
@@ -154,6 +177,7 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         session.version = proposal.base_version + len(accepted_token_ids)
 
         bonus_token_id = None
+        bonus_logprobs = None
         if accepted_token_ids and not proposal.draft_stopped:
             sample = self.sample_next_token_from_state(
                 temp_state,
@@ -162,6 +186,11 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
                 generator=session.generator,
             )
             bonus_token_id = sample.token_id
+            bonus_logprobs = pack_sample_logprobs(
+                sample.probs,
+                sample.token_id,
+                session.sampling.logprobs,
+            )
             session.accepted_prefix_token_ids.append(bonus_token_id)
             self.advance_runtime_state(temp_state, bonus_token_id)
             session.runtime_state = temp_state
@@ -175,7 +204,15 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
             accepted_token_ids=accepted_token_ids,
             verifier_version=session.version,
             bonus_token_id=bonus_token_id,
+            accepted_logprobs=accepted_logprobs or [],
+            bonus_logprobs=bonus_logprobs,
         )
+
+    def _verify_proposals_batch_sync(
+        self,
+        proposals: list[DraftProposal],
+    ) -> list[VerificationResult]:
+        return [self._verify_proposal_sync(proposal) for proposal in proposals]
 
     def _resync_session_sync(
         self,

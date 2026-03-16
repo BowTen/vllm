@@ -32,6 +32,8 @@ class SpecVerifierSubcommand(CLISubcommand):
                 dtype=args.dtype,
                 trust_remote_code=args.trust_remote_code,
                 log_level=args.log_level,
+                scheduler_max_batch_size=args.scheduler_max_batch_size,
+                scheduler_batch_wait_ms=args.scheduler_batch_wait_ms,
             )
         )
 
@@ -68,6 +70,18 @@ class SpecVerifierSubcommand(CLISubcommand):
             default="info",
             choices=["critical", "error", "warning", "info", "debug", "trace"],
             help="uvicorn log level.",
+        )
+        parser.add_argument(
+            "--scheduler-max-batch-size",
+            type=int,
+            default=8,
+            help="Maximum number of proposals to aggregate into one verifier micro-batch.",
+        )
+        parser.add_argument(
+            "--scheduler-batch-wait-ms",
+            type=float,
+            default=1.0,
+            help="Maximum wait time, in milliseconds, to collect additional proposals.",
         )
         parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return parser

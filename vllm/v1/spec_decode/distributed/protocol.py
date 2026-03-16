@@ -32,6 +32,8 @@ class SamplingMetadata(
     ignore_eos: bool = False
     logit_bias: dict[int, float] | None = None
     allowed_token_ids: list[int] | None = None
+    logprobs: int | None = None
+    bad_words_token_ids: list[list[int]] | None = None
 
     @classmethod
     def from_sampling_params(cls, params: "SamplingParams") -> "SamplingMetadata":
@@ -51,6 +53,8 @@ class SamplingMetadata(
             ignore_eos=params.ignore_eos,
             logit_bias=params.logit_bias,
             allowed_token_ids=params.allowed_token_ids,
+            logprobs=params.logprobs,
+            bad_words_token_ids=params.bad_words_token_ids,
         )
 
     def to_jsonable(self) -> dict[str, Any]:
@@ -70,7 +74,19 @@ class SamplingMetadata(
             "ignore_eos": self.ignore_eos,
             "logit_bias": self.logit_bias,
             "allowed_token_ids": self.allowed_token_ids,
+            "logprobs": self.logprobs,
+            "bad_words_token_ids": self.bad_words_token_ids,
         }
+
+
+class PackedLogprobs(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):
+    token_ids: list[int]
+    logprobs: list[float]
+    sampled_token_rank: int
 
 
 class OpenSessionRequest(
@@ -122,6 +138,8 @@ class VerificationResult(
     bonus_token_id: int | None = None
     reject_pos: int | None = None
     target_probs_at_reject_pos: bytes | None = None
+    accepted_logprobs: list[PackedLogprobs] = msgspec.field(default_factory=list)
+    bonus_logprobs: PackedLogprobs | None = None
 
 
 class CloseSessionRequest(

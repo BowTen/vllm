@@ -36,6 +36,8 @@ class VerifierServerArgs:
     dtype: str = "auto"
     trust_remote_code: bool = False
     log_level: str = "info"
+    scheduler_max_batch_size: int = 8
+    scheduler_batch_wait_ms: float = 1.0
 
 
 def build_app(args: VerifierServerArgs) -> FastAPI:
@@ -45,7 +47,11 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
     )
-    core = VerificationCore(runner)
+    core = VerificationCore(
+        runner,
+        scheduler_max_batch_size=args.scheduler_max_batch_size,
+        scheduler_batch_wait_ms=args.scheduler_batch_wait_ms,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
