@@ -249,6 +249,9 @@ class EdgeSessionCore:
 
     def shutdown(self) -> None:
         self.clear_local_state()
+        shutdown_runner = getattr(self._draft_runner, "shutdown", None)
+        if callable(shutdown_runner):
+            shutdown_runner()
         if self._structured_output_factory is not None:
             self._structured_output_factory.close()
 

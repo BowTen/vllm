@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -382,6 +383,107 @@ async def test_vllm_target_runner_batches_verification_queries(
     ]
     assert runner._sessions["session-a"].version == 2
     assert runner._sessions["session-b"].version == 0
+
+
+@pytest.mark.asyncio
+async def test_vllm_edge_runner_batches_proposals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_runtime = FakeRuntime(
+        [
+            runtime_mod.EngineChunkResult(
+                token_ids=[1],
+                logprobs=[_packed([0.0, 1.0, 0.0, 0.0], 1)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+            runtime_mod.EngineChunkResult(
+                token_ids=[2],
+                logprobs=[_packed([0.0, 0.0, 1.0, 0.0], 2)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+            runtime_mod.EngineChunkResult(
+                token_ids=[3],
+                logprobs=[_packed([0.0, 0.0, 0.0, 1.0], 3)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+            runtime_mod.EngineChunkResult(
+                token_ids=[0],
+                logprobs=[_packed([1.0, 0.0, 0.0, 0.0], 0)],
+                prompt_logprobs=[],
+                finish_reason=FinishReason.LENGTH,
+                stop_reason=None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(runtime_mod, "VllmEngineSessionRuntime", lambda _cfg: fake_runtime)
+    monkeypatch.setattr(runtime_mod, "_single_worker_runtime_config", lambda cfg: cfg)
+    monkeypatch.setattr(runtime_mod, "_override_runtime_device", lambda cfg, device: cfg)
+    monkeypatch.setattr(runtime_mod, "replace", _replace_namespace)
+
+    import vllm.v1.spec_decode.utils as utils_mod
+
+    monkeypatch.setattr(
+        utils_mod,
+        "create_vllm_config_for_draft_model",
+        lambda _cfg: SimpleNamespace(
+            cache_config=SimpleNamespace(gpu_memory_utilization=0.5),
+        ),
+    )
+
+    runner = runtime_mod.VllmEdgeDraftRunner(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                distributed_runtime_gpu_memory_utilization=0.3,
+                num_speculative_tokens=2,
+                draft_device=None,
+            )
+        )
+    )
+    generator_a = torch.Generator(device="cpu")
+    generator_a.manual_seed(0)
+    generator_b = torch.Generator(device="cpu")
+    generator_b.manual_seed(0)
+
+    output_a, output_b = await asyncio.gather(
+        runner.propose(
+            session_id="session-a",
+            proposal_id=0,
+            base_version=0,
+            accepted_prefix_token_ids=[9],
+            prompt_len=1,
+            sampling=_sampling(logprobs=1),
+            generator=generator_a,
+        ),
+        runner.propose(
+            session_id="session-b",
+            proposal_id=1,
+            base_version=0,
+            accepted_prefix_token_ids=[8],
+            prompt_len=1,
+            sampling=_sampling(logprobs=1),
+            generator=generator_b,
+        ),
+    )
+
+    assert output_a.proposal.draft_token_ids == [1, 3]
+    assert output_b.proposal.draft_token_ids == [2, 0]
+    assert fake_runtime.batch_calls == [
+        [
+            ("session-a", [9], 1, -1),
+            ("session-b", [8], 1, -1),
+        ],
+        [
+            ("session-a", [9, 1], 1, -1),
+            ("session-b", [8, 2], 1, -1),
+        ],
+    ]
+    runner.shutdown()
 
 
 def test_single_worker_runtime_config_disables_async_scheduling(

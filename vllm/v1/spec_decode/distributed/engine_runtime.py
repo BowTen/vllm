@@ -228,6 +228,31 @@ class RuntimeSessionRecord:
     next_request_index: int = 0
 
 
+@dataclass
+class _DraftProposalJob:
+    session_id: str
+    proposal_id: int
+    base_version: int
+    accepted_prefix_token_ids: list[int]
+    prompt_len: int
+    sampling: SamplingMetadata
+    generator: torch.Generator
+    structured_output_session: Any | None
+    future: asyncio.Future[DraftProposalOutput]
+
+
+@dataclass
+class _DraftProposalBatchState:
+    job: _DraftProposalJob
+    prefix_token_ids: list[int]
+    max_steps: int
+    stopped: bool
+    generator_state: torch.Tensor
+    draft_token_ids: list[int] = field(default_factory=list)
+    draft_token_probs: list[float] = field(default_factory=list)
+    structured_advances: int = 0
+
+
 def _override_runtime_device(
     vllm_config: VllmConfig,
     device: str | None,
@@ -492,6 +517,9 @@ class VllmEngineSessionRuntime:
 
 
 class VllmEdgeDraftRunner:
+    _DEFAULT_BATCH_WAIT_S = 0.001
+    _DEFAULT_MAX_BATCH_SIZE = 8
+
     def __init__(self, vllm_config: "VllmConfig") -> None:
         from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 
@@ -511,13 +539,30 @@ class VllmEdgeDraftRunner:
         self._runtime = VllmEngineSessionRuntime(runtime_config)
         self.vocab_size = self._runtime.vocab_size
         self.num_speculative_tokens = spec_config.num_speculative_tokens
+        self._queue: asyncio.Queue[_DraftProposalJob] = asyncio.Queue()
+        self._pending_jobs: list[_DraftProposalJob] = []
+        self._worker_task: asyncio.Task[None] | None = None
+        self._closed = False
 
     def close_session(self, session_id: str) -> None:
         self._runtime._close_session_sync(session_id)
 
     def clear_sessions(self) -> None:
-        for session_id in list(self._runtime._sessions.keys()):
+        sessions = getattr(self._runtime, "_sessions", None)
+        if sessions is None:
+            return
+        for session_id in list(sessions.keys()):
             self._runtime._close_session_sync(session_id)
+
+    def shutdown(self) -> None:
+        self._closed = True
+        if self._worker_task is not None:
+            self._worker_task.cancel()
+            self._worker_task = None
+        self.clear_sessions()
+        shutdown_runtime = getattr(self._runtime, "shutdown", None)
+        if callable(shutdown_runtime):
+            shutdown_runtime()
 
     async def propose(
         self,
@@ -530,97 +575,221 @@ class VllmEdgeDraftRunner:
         generator: torch.Generator,
         structured_output_session: Any | None = None,
     ) -> DraftProposalOutput:
-        remaining = None
-        current_output_len = len(accepted_prefix_token_ids) - prompt_len
-        if sampling.max_tokens is not None:
-            remaining = max(0, sampling.max_tokens - current_output_len)
-        max_steps = self.num_speculative_tokens
-        if remaining is not None:
-            max_steps = min(max_steps, remaining)
-        if max_steps <= 0:
-            from vllm.v1.spec_decode.distributed.protocol import DraftProposal
-
-            return DraftProposalOutput(
-                proposal=DraftProposal(
-                    session_id=session_id,
-                    proposal_id=proposal_id,
-                    base_version=base_version,
-                    accepted_prefix_len=len(accepted_prefix_token_ids),
-                    draft_token_ids=[],
-                    draft_token_probs=[],
-                    draft_stopped=True,
-                ),
-                stopped=True,
+        if self._closed:
+            raise RuntimeError("VllmEdgeDraftRunner is closed.")
+        future = asyncio.get_running_loop().create_future()
+        await self._queue.put(
+            _DraftProposalJob(
+                session_id=session_id,
+                proposal_id=proposal_id,
+                base_version=base_version,
+                accepted_prefix_token_ids=list(accepted_prefix_token_ids),
+                prompt_len=prompt_len,
+                sampling=sampling,
+                generator=generator,
+                structured_output_session=structured_output_session,
+                future=future,
             )
-        draft_token_ids: list[int] = []
-        draft_token_probs: list[float] = []
-        prefix_token_ids = list(accepted_prefix_token_ids)
-        structured_advances = 0
-        stopped = max_steps < self.num_speculative_tokens
+        )
+        self._ensure_worker()
+        return await future
+
+    def _ensure_worker(self) -> None:
+        if self._worker_task is None:
+            self._worker_task = asyncio.create_task(
+                self._run_scheduler(),
+                name="DistributedSpecDraftProposalScheduler",
+            )
+
+    async def _run_scheduler(self) -> None:
         try:
-            for _ in range(max_steps):
-                chunk = await self._runtime.run_chunk(
-                    session_id,
-                    prefix_token_ids,
-                    sampling,
-                    max_tokens=1,
-                    logprobs=-1,
-                )
-                if len(chunk.logprobs) != 1:
-                    raise ValueError(
-                        "Draft runtime expected a single-token probability result."
+            while True:
+                first_job = await self._next_job()
+                jobs = await self._collect_batch(first_job)
+                if not jobs:
+                    continue
+                try:
+                    outputs = await self._process_batch(jobs)
+                except Exception as exc:
+                    for job in jobs:
+                        if not job.future.done():
+                            job.future.set_exception(exc)
+                else:
+                    for job, output in zip(jobs, outputs):
+                        if not job.future.done():
+                            job.future.set_result(output)
+        except asyncio.CancelledError:
+            for job in self._pending_jobs:
+                if not job.future.done():
+                    job.future.set_exception(
+                        RuntimeError("Draft proposal scheduler was cancelled.")
                     )
-                logits = _logits_from_packed_logprobs(
-                    chunk.logprobs[0],
-                    self.vocab_size,
+            self._pending_jobs.clear()
+            raise
+
+    async def _next_job(self) -> _DraftProposalJob:
+        if self._pending_jobs:
+            return self._pending_jobs.pop(0)
+        return await self._queue.get()
+
+    async def _collect_batch(
+        self,
+        first_job: _DraftProposalJob,
+    ) -> list[_DraftProposalJob]:
+        batch = [first_job]
+        seen_session_ids = {first_job.session_id}
+        if self._DEFAULT_MAX_BATCH_SIZE == 1:
+            return batch
+
+        deadline = time.monotonic() + self._DEFAULT_BATCH_WAIT_S
+        while len(batch) < self._DEFAULT_MAX_BATCH_SIZE:
+            timeout_s = deadline - time.monotonic()
+            if timeout_s <= 0:
+                break
+            try:
+                job = await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                break
+            if job.session_id in seen_session_ids:
+                self._pending_jobs.append(job)
+                continue
+            batch.append(job)
+            seen_session_ids.add(job.session_id)
+
+        while len(batch) < self._DEFAULT_MAX_BATCH_SIZE:
+            try:
+                job = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if job.session_id in seen_session_ids:
+                self._pending_jobs.append(job)
+                continue
+            batch.append(job)
+            seen_session_ids.add(job.session_id)
+        return batch
+
+    async def _process_batch(
+        self,
+        jobs: list[_DraftProposalJob],
+    ) -> list[DraftProposalOutput]:
+        remaining = None
+        states: list[_DraftProposalBatchState] = []
+        for job in jobs:
+            current_output_len = len(job.accepted_prefix_token_ids) - job.prompt_len
+            if job.sampling.max_tokens is not None:
+                remaining = max(0, job.sampling.max_tokens - current_output_len)
+            else:
+                remaining = None
+            max_steps = self.num_speculative_tokens
+            if remaining is not None:
+                max_steps = min(max_steps, remaining)
+            states.append(
+                _DraftProposalBatchState(
+                    job=job,
+                    prefix_token_ids=list(job.accepted_prefix_token_ids),
+                    max_steps=max_steps,
+                    stopped=max_steps < self.num_speculative_tokens,
+                    generator_state=job.generator.get_state(),
                 )
-                masked_logits = apply_structured_output_mask(
-                    logits,
-                    structured_output_session,
-                )
-                sample = sample_from_logits(
-                    masked_logits,
-                    sampling,
-                    prompt_token_ids=prefix_token_ids[:prompt_len],
-                    output_token_ids=prefix_token_ids[prompt_len:],
-                    generator=generator,
-                    suppress_stops=len(prefix_token_ids) - prompt_len
-                    < sampling.min_tokens,
-                )
-                draft_token_ids.append(sample.token_id)
-                draft_token_probs.append(sample.token_prob)
-                prefix_token_ids.append(sample.token_id)
-                accept_structured_output_tokens(
-                    structured_output_session,
-                    [sample.token_id],
-                )
-                structured_advances += 1
-                if is_terminal_token(
-                    sample.token_id,
-                    sampling,
-                    len(prefix_token_ids) - prompt_len,
-                ):
-                    stopped = True
-                    break
-        finally:
-            rollback_structured_output_tokens(
-                structured_output_session,
-                structured_advances,
             )
 
+        try:
+            max_steps = max((state.max_steps for state in states), default=0)
+            for _ in range(max_steps):
+                active_states = [
+                    state
+                    for state in states
+                    if not state.stopped and len(state.draft_token_ids) < state.max_steps
+                ]
+                if not active_states:
+                    break
+                chunks = await self._runtime.run_queries(
+                    [
+                        EngineQuery(
+                            session_id=state.job.session_id,
+                            prefix_token_ids=state.prefix_token_ids,
+                            sampling=state.job.sampling,
+                            max_tokens=1,
+                            logprobs=-1,
+                        )
+                        for state in active_states
+                    ]
+                )
+                for state, chunk in zip(active_states, chunks):
+                    if len(chunk.logprobs) != 1:
+                        raise ValueError(
+                            "Draft runtime expected a single-token probability result."
+                        )
+                    logits = _logits_from_packed_logprobs(
+                        chunk.logprobs[0],
+                        self.vocab_size,
+                    )
+                    masked_logits = apply_structured_output_mask(
+                        logits,
+                        state.job.structured_output_session,
+                    )
+                    sample = sample_from_logits(
+                        masked_logits,
+                        state.job.sampling,
+                        prompt_token_ids=state.prefix_token_ids[: state.job.prompt_len],
+                        output_token_ids=state.prefix_token_ids[state.job.prompt_len :],
+                        generator=state.job.generator,
+                        suppress_stops=len(state.prefix_token_ids) - state.job.prompt_len
+                        < state.job.sampling.min_tokens,
+                    )
+                    state.draft_token_ids.append(sample.token_id)
+                    state.draft_token_probs.append(sample.token_prob)
+                    state.prefix_token_ids.append(sample.token_id)
+                    accept_structured_output_tokens(
+                        state.job.structured_output_session,
+                        [sample.token_id],
+                    )
+                    state.structured_advances += 1
+                    if is_terminal_token(
+                        sample.token_id,
+                        state.job.sampling,
+                        len(state.prefix_token_ids) - state.job.prompt_len,
+                    ):
+                        state.stopped = True
+
+            return [
+                self._build_proposal_output(state)
+                for state in states
+            ]
+        except Exception:
+            for state in states:
+                state.job.generator.set_state(state.generator_state)
+                rollback_structured_output_tokens(
+                    state.job.structured_output_session,
+                    state.structured_advances,
+                )
+                state.structured_advances = 0
+            raise
+        finally:
+            for state in states:
+                rollback_structured_output_tokens(
+                    state.job.structured_output_session,
+                    state.structured_advances,
+                )
+                state.structured_advances = 0
+
+    def _build_proposal_output(
+        self,
+        state: _DraftProposalBatchState,
+    ) -> DraftProposalOutput:
         from vllm.v1.spec_decode.distributed.protocol import DraftProposal
 
         return DraftProposalOutput(
             proposal=DraftProposal(
-                session_id=session_id,
-                proposal_id=proposal_id,
-                base_version=base_version,
-                accepted_prefix_len=len(accepted_prefix_token_ids),
-                draft_token_ids=draft_token_ids,
-                draft_token_probs=draft_token_probs,
-                draft_stopped=stopped,
+                session_id=state.job.session_id,
+                proposal_id=state.job.proposal_id,
+                base_version=state.job.base_version,
+                accepted_prefix_len=len(state.job.accepted_prefix_token_ids),
+                draft_token_ids=state.draft_token_ids,
+                draft_token_probs=state.draft_token_probs,
+                draft_stopped=state.stopped,
             ),
-            stopped=stopped,
+            stopped=state.stopped,
         )
 
 

@@ -357,6 +357,9 @@ Implementation update:
   independent prefix-cached next-token queries; sampling, bad-words handling,
   and structured-output rollback remain controlled by the distributed
   speculative layer
+- concurrent edge sessions now share a local draft proposal scheduler that
+  batches same-step next-token queries across sessions before returning
+  per-session draft proposals
 
 ## 8.2 Cloud side
 

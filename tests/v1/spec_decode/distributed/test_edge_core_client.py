@@ -374,6 +374,26 @@ def _collect_outputs_sync_detailed(client: EngineCoreClient):
     return collected
 
 
+def _collect_outputs_sync_multi(
+    client: EngineCoreClient,
+    request_ids: list[str],
+) -> tuple[dict[str, list[int]], dict[str, FinishReason | None]]:
+    tokens_by_request = {request_id: [] for request_id in request_ids}
+    finish_by_request: dict[str, FinishReason | None] = {
+        request_id: None for request_id in request_ids
+    }
+    unfinished = set(request_ids)
+    while unfinished:
+        outputs = client.get_output()
+        assert len(outputs.outputs) == 1
+        output = outputs.outputs[0]
+        tokens_by_request[output.request_id].extend(output.new_token_ids)
+        if output.finish_reason is not None:
+            finish_by_request[output.request_id] = output.finish_reason
+            unfinished.discard(output.request_id)
+    return tokens_by_request, finish_by_request
+
+
 async def _collect_outputs_async(
     client: EngineCoreClient,
 ) -> tuple[list[int], FinishReason | None]:
@@ -426,6 +446,44 @@ def test_distributed_client_supports_sync_generate_path(
     assert tokens == [11, 12, 99, 77, 88]
     assert finish_reason == FinishReason.LENGTH
     _assert_common_call_log(call_log)
+
+
+def test_distributed_client_supports_multiple_sync_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    verifier_server,
+) -> None:
+    base_url, call_log = verifier_server
+    monkeypatch.setattr(edge_client_mod, "EdgeDraftRunner", FakeDraftRunner)
+    client = EngineCoreClient.make_client(
+        multiprocess_mode=True,
+        asyncio_mode=False,
+        vllm_config=make_fake_vllm_config(base_url),
+        executor_class=object,
+        log_stats=False,
+    )
+    request_ids = ["request-a", "request-b"]
+    try:
+        for request_id in request_ids:
+            client.add_request(make_request(request_id=request_id, max_tokens=5))
+        tokens_by_request, finish_by_request = _collect_outputs_sync_multi(
+            client,
+            request_ids,
+        )
+    finally:
+        client.shutdown()
+
+    assert tokens_by_request == {
+        "request-a": [11, 12, 99, 77, 88],
+        "request-b": [11, 12, 99, 77, 88],
+    }
+    assert finish_by_request == {
+        "request-a": FinishReason.LENGTH,
+        "request-b": FinishReason.LENGTH,
+    }
+    assert [name for name, *_ in call_log].count("open_session") == 2
+    assert [name for name, *_ in call_log].count("verify_proposal") == 6
+    assert [name for name, *_ in call_log].count("resync_session") == 2
+    assert [name for name, *_ in call_log].count("close_session") == 2
 
 
 @pytest.mark.asyncio
