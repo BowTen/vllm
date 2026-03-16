@@ -348,6 +348,16 @@ Responsibilities:
 - apply verification results
 - update draft-side internal state
 
+Implementation update:
+
+- the vLLM-native backend does not rely on `EngineCore` resumable sessions for
+  speculative rollback, because verifier reject/resync can jump to arbitrary
+  accepted prefixes that do not match the scheduler's streaming-input contract
+- instead, the draft runtime keeps a long-lived local `EngineCore` and issues
+  independent prefix-cached next-token queries; sampling, bad-words handling,
+  and structured-output rollback remain controlled by the distributed
+  speculative layer
+
 ## 8.2 Cloud side
 
 ### `VerifierGateway`
@@ -441,6 +451,15 @@ Responsibilities:
 - verifier-side target forward passes
 - generation of structured verification results
 - update target-side runtime state
+
+Implementation update:
+
+- the vLLM-native verifier backend follows the same pattern as the draft side:
+  a persistent local `EngineCore` is used as a raw next-token distribution
+  oracle, while verifier RNG state, acceptance bookkeeping, and
+  structured-output session state remain in the distributed verifier layer
+- this preserves exact speculative accept/reject and resync semantics while
+  still reusing vLLM prefix cache instead of full Hugging Face forward passes
 
 ---
 
@@ -610,6 +629,13 @@ The cloud side should:
 - create a target-side session
 - perform prompt prefill
 - initialize target-side runtime/KV state
+
+Implementation update:
+
+- in the vLLM-native backend, session-local target state is the accepted prefix,
+  verifier RNG, and structured-output state; model-side reuse comes from a
+  long-lived `EngineCore` plus prefix caching rather than mutable resumable
+  request objects
 
 ### Step 4: edge generates a draft proposal
 

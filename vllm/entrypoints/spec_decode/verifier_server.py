@@ -16,6 +16,9 @@ from vllm.v1.spec_decode.distributed.errors import (
     VerifierQueueTimeoutError,
     VerifierSessionMissingError,
 )
+from vllm.v1.spec_decode.distributed.engine_runtime import (
+    VllmTargetVerificationRunner,
+)
 from vllm.v1.spec_decode.distributed.protocol import (
     CloseSessionRequest,
     DraftProposal,
@@ -40,6 +43,8 @@ class VerifierServerArgs:
     device: str | None = None
     dtype: str = "auto"
     trust_remote_code: bool = False
+    runtime_backend: str = "vllm"
+    gpu_memory_utilization: float = 0.3
     log_level: str = "info"
     scheduler_max_batch_size: int = 8
     scheduler_batch_wait_ms: float = 1.0
@@ -49,12 +54,20 @@ class VerifierServerArgs:
 
 
 def build_app(args: VerifierServerArgs) -> FastAPI:
-    runner = TargetVerificationRunner(
+    runner_cls = (
+        VllmTargetVerificationRunner
+        if args.runtime_backend == "vllm"
+        else TargetVerificationRunner
+    )
+    runner_kwargs = dict(
         model_name=args.model,
         device=args.device,
         dtype=args.dtype,
         trust_remote_code=args.trust_remote_code,
     )
+    if args.runtime_backend == "vllm":
+        runner_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+    runner = runner_cls(**runner_kwargs)
     core = VerificationCore(
         runner,
         scheduler_max_batch_size=args.scheduler_max_batch_size,

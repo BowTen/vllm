@@ -31,6 +31,8 @@ class SpecVerifierSubcommand(CLISubcommand):
                 device=args.device,
                 dtype=args.dtype,
                 trust_remote_code=args.trust_remote_code,
+                runtime_backend=args.runtime_backend,
+                gpu_memory_utilization=args.gpu_memory_utilization,
                 log_level=args.log_level,
                 scheduler_max_batch_size=args.scheduler_max_batch_size,
                 scheduler_batch_wait_ms=args.scheduler_batch_wait_ms,
@@ -67,6 +69,18 @@ class SpecVerifierSubcommand(CLISubcommand):
             "--trust-remote-code",
             action="store_true",
             help="Forward trust_remote_code=True to transformers.",
+        )
+        parser.add_argument(
+            "--runtime-backend",
+            default="vllm",
+            choices=["hf", "vllm"],
+            help="Model runtime used inside the verifier service.",
+        )
+        parser.add_argument(
+            "--gpu-memory-utilization",
+            type=float,
+            default=0.3,
+            help="GPU memory utilization for the verifier runtime.",
         )
         parser.add_argument(
             "--log-level",

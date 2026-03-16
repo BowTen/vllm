@@ -182,6 +182,21 @@ class SpeculativeConfig:
     """Timeout, in seconds, for verifier RPCs used by the experimental
     distributed draft-model flow."""
 
+    distributed_runtime_backend: Literal["hf", "vllm"] = "vllm"
+    """Backend used for the experimental distributed draft-model runtimes.
+    ``hf`` preserves the original Transformers-based implementation, while
+    ``vllm`` runs both draft and verifier-side target execution through a
+    local vLLM engine."""
+
+    distributed_runtime_gpu_memory_utilization: float = Field(
+        default=0.3,
+        gt=0.0,
+        le=1.0,
+    )
+    """GPU memory utilization used by the local experimental distributed
+    runtimes. This is intentionally conservative because the draft and
+    verifier runtimes are often launched on shared devices."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

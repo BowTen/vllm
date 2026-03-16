@@ -75,11 +75,13 @@ class FakeSpeculativeConfig:
         verifier_timeout_s: float = 5.0,
         num_speculative_tokens: int = 2,
         draft_model_config: Any | None = None,
+        distributed_runtime_backend: str = "hf",
     ):
         self.verifier_url = verifier_url
         self.verifier_timeout_s = verifier_timeout_s
         self.num_speculative_tokens = num_speculative_tokens
         self.draft_model_config = draft_model_config
+        self.distributed_runtime_backend = distributed_runtime_backend
 
     def uses_distributed_draft_model(self) -> bool:
         return True
@@ -337,6 +339,7 @@ def verifier_server(monkeypatch: pytest.MonkeyPatch):
             model="fake-model",
             host="127.0.0.1",
             port=port,
+            runtime_backend="hf",
         )
     )
     harness = VerifierServerHarness(app, port)

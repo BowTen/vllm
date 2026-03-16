@@ -46,6 +46,7 @@ from vllm.v1.spec_decode.distributed.protocol import (
     ResyncSessionResponse,
     VerificationResult,
 )
+from vllm.v1.spec_decode.distributed.engine_runtime import VllmEdgeDraftRunner
 from vllm.v1.spec_decode.distributed.runtime import EdgeDraftRunner
 from vllm.v1.spec_decode.distributed.structured_output import StructuredOutputFactory
 
@@ -139,7 +140,15 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
         self._loop_ready = Event()
         self._loop_thread: Thread | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
-        self._draft_runner = EdgeDraftRunner(vllm_config)
+        runtime_backend = getattr(
+            self.speculative_config,
+            "distributed_runtime_backend",
+            "vllm",
+        )
+        draft_runner_cls = (
+            VllmEdgeDraftRunner if runtime_backend == "vllm" else EdgeDraftRunner
+        )
+        self._draft_runner = draft_runner_cls(vllm_config)
         self._verifier = VerifierRPCClient(
             self.speculative_config.verifier_url,
             self.speculative_config.verifier_timeout_s,

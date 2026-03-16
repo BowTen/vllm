@@ -82,3 +82,79 @@ def build_logprobs_tensors(
             device="cpu",
         ),
     )
+
+
+def _pack_logprobs_row(
+    token_ids: np.ndarray | torch.Tensor,
+    logprobs: np.ndarray | torch.Tensor,
+    sampled_token_id: int,
+    sampled_token_rank: int,
+) -> PackedLogprobs:
+    if isinstance(token_ids, torch.Tensor):
+        token_ids_list = token_ids.to(dtype=torch.int64).tolist()
+    else:
+        token_ids_list = token_ids.astype(np.int64).tolist()
+    if isinstance(logprobs, torch.Tensor):
+        logprobs_list = logprobs.to(dtype=torch.float32).tolist()
+    else:
+        logprobs_list = logprobs.astype(np.float32).tolist()
+
+    try:
+        sampled_index = token_ids_list.index(sampled_token_id)
+    except ValueError:
+        sampled_logprob = float("-inf")
+    else:
+        sampled_logprob = float(logprobs_list.pop(sampled_index))
+        token_ids_list.pop(sampled_index)
+
+    return PackedLogprobs(
+        token_ids=[sampled_token_id] + token_ids_list,
+        logprobs=[sampled_logprob] + logprobs_list,
+        sampled_token_rank=int(sampled_token_rank),
+    )
+
+
+def pack_logprobs_lists(
+    logprobs: LogprobsLists,
+    sampled_token_ids: list[int],
+) -> list[PackedLogprobs]:
+    return [
+        _pack_logprobs_row(
+            logprobs.logprob_token_ids[idx],
+            logprobs.logprobs[idx],
+            sampled_token_id=sampled_token_ids[idx],
+            sampled_token_rank=int(logprobs.sampled_token_ranks[idx]),
+        )
+        for idx in range(len(sampled_token_ids))
+    ]
+
+
+def pack_logprobs_tensors(
+    logprobs: LogprobsTensors,
+    sampled_token_ids: list[int],
+) -> list[PackedLogprobs]:
+    return [
+        _pack_logprobs_row(
+            logprobs.logprob_token_ids[idx],
+            logprobs.logprobs[idx],
+            sampled_token_id=sampled_token_ids[idx],
+            sampled_token_rank=int(logprobs.selected_token_ranks[idx].item()),
+        )
+        for idx in range(len(sampled_token_ids))
+    ]
+
+
+def dense_probs_from_packed_logprobs(
+    entry: PackedLogprobs,
+    vocab_size: int,
+) -> torch.Tensor:
+    probs = torch.zeros(vocab_size, dtype=torch.float32)
+    token_ids = torch.tensor(entry.token_ids, dtype=torch.long)
+    logprobs = torch.tensor(entry.logprobs, dtype=torch.float32)
+    probs[token_ids] = torch.exp(logprobs)
+    total = float(probs.sum().item())
+    if total <= 0:
+        raise ValueError("Packed logprobs do not contain a valid distribution.")
+    if abs(total - 1.0) > 1e-4:
+        probs = probs / total
+    return probs
