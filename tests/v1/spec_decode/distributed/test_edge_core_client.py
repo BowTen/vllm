@@ -77,7 +77,7 @@ class FakeDraftRunner:
     vocab_size = 128
 
     def __init__(self, _vllm_config: Any) -> None:
-        pass
+        self.closed_sessions: list[str] = []
 
     async def propose(
         self,
@@ -108,6 +108,12 @@ class FakeDraftRunner:
             ),
             stopped=draft_stopped,
         )
+
+    def close_session(self, session_id: str) -> None:
+        self.closed_sessions.append(session_id)
+
+    def clear_sessions(self) -> None:
+        self.closed_sessions.clear()
 
 
 def _make_fake_target_runner(call_log: list[tuple[str, Any]]) -> type:

@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM
+from transformers.cache_utils import DynamicCache
 
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.distributed.protocol import DraftProposal, SamplingMetadata
@@ -59,6 +60,40 @@ def deserialize_probs(raw: bytes, vocab_size: int) -> torch.Tensor:
     return torch.from_numpy(array.copy())
 
 
+@dataclass
+class IncrementalRuntimeState:
+    token_ids: list[int]
+    cache: Any | None
+    next_logits: torch.Tensor
+
+
+def _common_prefix_len(lhs: list[int], rhs: list[int]) -> int:
+    matched = 0
+    for left, right in zip(lhs, rhs):
+        if left != right:
+            break
+        matched += 1
+    return matched
+
+
+def clone_runtime_cache(cache: Any | None) -> Any | None:
+    if cache is None:
+        return None
+    if hasattr(cache, "to_legacy_cache") and hasattr(type(cache), "from_legacy_cache"):
+        return type(cache).from_legacy_cache(cache.to_legacy_cache())
+    if isinstance(cache, tuple):
+        return DynamicCache.from_legacy_cache(cache)
+    raise TypeError(f"Unsupported cache type for cloning: {type(cache)!r}")
+
+
+def normalize_runtime_cache(cache: Any | None) -> Any | None:
+    if cache is None:
+        return None
+    if isinstance(cache, tuple):
+        return DynamicCache.from_legacy_cache(cache)
+    return cache
+
+
 class BaseCausalLMRuntime:
     def __init__(
         self,
@@ -80,6 +115,24 @@ class BaseCausalLMRuntime:
         self.model.eval()
         self.vocab_size = int(self.model.config.vocab_size)
 
+    def sample_next_token_from_state(
+        self,
+        state: IncrementalRuntimeState,
+        prompt_len: int,
+        sampling: SamplingMetadata,
+        generator: torch.Generator,
+    ) -> SampleResult:
+        output_token_ids = state.token_ids[prompt_len:]
+        suppress_stops = len(output_token_ids) < sampling.min_tokens
+        return sample_from_logits(
+            state.next_logits,
+            sampling,
+            prompt_token_ids=state.token_ids[:prompt_len],
+            output_token_ids=output_token_ids,
+            generator=generator,
+            suppress_stops=suppress_stops,
+        )
+
     def sample_next_token(
         self,
         prefix_token_ids: list[int],
@@ -87,22 +140,89 @@ class BaseCausalLMRuntime:
         sampling: SamplingMetadata,
         generator: torch.Generator,
     ) -> SampleResult:
+        return self.sample_next_token_from_state(
+            self.build_runtime_state(prefix_token_ids),
+            prompt_len=prompt_len,
+            sampling=sampling,
+            generator=generator,
+        )
+
+    def build_runtime_state(
+        self, token_ids: list[int]
+    ) -> IncrementalRuntimeState:
+        cache, next_logits = self._run_tokens(token_ids, cache=None)
+        return IncrementalRuntimeState(
+            token_ids=list(token_ids),
+            cache=cache,
+            next_logits=next_logits,
+        )
+
+    def sync_runtime_state(
+        self,
+        state: IncrementalRuntimeState | None,
+        token_ids: list[int],
+    ) -> IncrementalRuntimeState:
+        if state is None:
+            return self.build_runtime_state(token_ids)
+        if state.token_ids == token_ids:
+            return state
+
+        common_prefix_len = _common_prefix_len(state.token_ids, token_ids)
+        if common_prefix_len == len(state.token_ids):
+            missing = token_ids[common_prefix_len:]
+            if missing:
+                self.extend_runtime_state(state, missing)
+            return state
+
+        return self.build_runtime_state(token_ids)
+
+    def clone_runtime_state(
+        self, state: IncrementalRuntimeState
+    ) -> IncrementalRuntimeState:
+        return IncrementalRuntimeState(
+            token_ids=list(state.token_ids),
+            cache=clone_runtime_cache(state.cache),
+            next_logits=state.next_logits.clone(),
+        )
+
+    def extend_runtime_state(
+        self,
+        state: IncrementalRuntimeState,
+        token_ids: list[int],
+    ) -> None:
+        if not token_ids:
+            return
+        cache, next_logits = self._run_tokens(token_ids, cache=state.cache)
+        state.token_ids.extend(token_ids)
+        state.cache = cache
+        state.next_logits = next_logits
+
+    def advance_runtime_state(
+        self,
+        state: IncrementalRuntimeState,
+        token_id: int,
+    ) -> None:
+        self.extend_runtime_state(state, [token_id])
+
+    def _run_tokens(
+        self,
+        token_ids: list[int],
+        cache: Any | None,
+    ) -> tuple[Any | None, torch.Tensor]:
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
-        inputs = torch.tensor([prefix_token_ids], device=self.device, dtype=torch.long)
+        inputs = torch.tensor([token_ids], device=self.device, dtype=torch.long)
+        kwargs: dict[str, Any] = {
+            "input_ids": inputs,
+            "use_cache": True,
+        }
+        if cache is not None:
+            kwargs["past_key_values"] = cache
         with torch.inference_mode():
-            outputs = self.model(input_ids=inputs, use_cache=False)
-        logits = outputs.logits[0, -1]
-        output_token_ids = prefix_token_ids[prompt_len:]
-        suppress_stops = len(output_token_ids) < sampling.min_tokens
-        return sample_from_logits(
-            logits,
-            sampling,
-            prompt_token_ids=prefix_token_ids[:prompt_len],
-            output_token_ids=output_token_ids,
-            generator=generator,
-            suppress_stops=suppress_stops,
-        )
+            outputs = self.model(**kwargs)
+        next_logits = outputs.logits[0, -1].detach()
+        next_cache = normalize_runtime_cache(outputs.past_key_values)
+        return next_cache, next_logits
 
 
 @dataclass
@@ -125,6 +245,13 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
         )
         self.num_speculative_tokens = spec_config.num_speculative_tokens
         self._lock = asyncio.Lock()
+        self._sessions: dict[str, IncrementalRuntimeState] = {}
+
+    def close_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    def clear_sessions(self) -> None:
+        self._sessions.clear()
 
     async def propose(
         self,
@@ -169,13 +296,20 @@ class EdgeDraftRunner(BaseCausalLMRuntime):
             max_steps = min(max_steps, remaining)
 
         stopped = max_steps < self.num_speculative_tokens
-        prefix = list(accepted_prefix_token_ids)
+        runtime_state = self.sync_runtime_state(
+            self._sessions.get(session_id),
+            accepted_prefix_token_ids,
+        )
+        self._sessions[session_id] = runtime_state
+        temp_state = self.clone_runtime_state(runtime_state)
         for _ in range(max_steps):
-            result = self.sample_next_token(prefix, prompt_len, sampling, generator)
+            result = self.sample_next_token_from_state(
+                temp_state, prompt_len, sampling, generator
+            )
             draft_token_ids.append(result.token_id)
             draft_token_probs.append(result.token_prob)
-            prefix.append(result.token_id)
-            output_len_after = len(prefix) - prompt_len
+            self.advance_runtime_state(temp_state, result.token_id)
+            output_len_after = len(temp_state.token_ids) - prompt_len
             if is_terminal_token(result.token_id, sampling, output_len_after):
                 stopped = True
                 break

@@ -21,6 +21,7 @@ from vllm.v1.spec_decode.distributed.protocol import (
 )
 from vllm.v1.spec_decode.distributed.runtime import (
     BaseCausalLMRuntime,
+    IncrementalRuntimeState,
     resolve_runtime_device,
     resolve_torch_dtype,
     serialize_probs,
@@ -37,6 +38,7 @@ class CloudSession:
     version: int
     sampling: Any
     generator: torch.Generator
+    runtime_state: IncrementalRuntimeState | None = None
 
 
 class TargetVerificationRunner(BaseCausalLMRuntime):
@@ -91,13 +93,7 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         request: ResyncSessionRequest,
     ) -> ResyncSessionResponse:
         async with self._lock:
-            session = self._get_session(request.session_id)
-            session.accepted_prefix_token_ids = list(request.accepted_prefix_token_ids)
-            session.version = request.edge_version
-            return ResyncSessionResponse(
-                session_id=request.session_id,
-                session_version=session.version,
-            )
+            return await asyncio.to_thread(self._resync_session_sync, request)
 
     async def verify_proposal(
         self,
@@ -121,17 +117,24 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
             )
 
         accepted_prefix = list(session.accepted_prefix_token_ids)
+        runtime_state = self.sync_runtime_state(
+            session.runtime_state,
+            accepted_prefix,
+        )
+        session.runtime_state = runtime_state
+        temp_state = self.clone_runtime_state(runtime_state)
         accepted_token_ids: list[int] = []
         for reject_pos, draft_token_id in enumerate(proposal.draft_token_ids):
-            prefix = accepted_prefix + accepted_token_ids
-            sample = self.sample_next_token(
-                prefix,
+            sample = self.sample_next_token_from_state(
+                temp_state,
                 prompt_len=session.prompt_len,
                 sampling=session.sampling,
                 generator=session.generator,
             )
             if sample.token_id != draft_token_id:
+                prefix = accepted_prefix + accepted_token_ids
                 session.accepted_prefix_token_ids = prefix
+                session.runtime_state = temp_state
                 session.version = proposal.base_version + len(accepted_token_ids)
                 return VerificationResult(
                     session_id=proposal.session_id,
@@ -144,20 +147,24 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
                     verifier_version=session.version,
                 )
             accepted_token_ids.append(draft_token_id)
+            self.advance_runtime_state(temp_state, draft_token_id)
 
         session.accepted_prefix_token_ids = accepted_prefix + accepted_token_ids
+        session.runtime_state = temp_state
         session.version = proposal.base_version + len(accepted_token_ids)
 
         bonus_token_id = None
         if accepted_token_ids and not proposal.draft_stopped:
-            sample = self.sample_next_token(
-                session.accepted_prefix_token_ids,
+            sample = self.sample_next_token_from_state(
+                temp_state,
                 prompt_len=session.prompt_len,
                 sampling=session.sampling,
                 generator=session.generator,
             )
             bonus_token_id = sample.token_id
             session.accepted_prefix_token_ids.append(bonus_token_id)
+            self.advance_runtime_state(temp_state, bonus_token_id)
+            session.runtime_state = temp_state
             session.version += 1
 
         return VerificationResult(
@@ -168,6 +175,22 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
             accepted_token_ids=accepted_token_ids,
             verifier_version=session.version,
             bonus_token_id=bonus_token_id,
+        )
+
+    def _resync_session_sync(
+        self,
+        request: ResyncSessionRequest,
+    ) -> ResyncSessionResponse:
+        session = self._get_session(request.session_id)
+        session.accepted_prefix_token_ids = list(request.accepted_prefix_token_ids)
+        session.runtime_state = self.sync_runtime_state(
+            session.runtime_state,
+            session.accepted_prefix_token_ids,
+        )
+        session.version = request.edge_version
+        return ResyncSessionResponse(
+            session_id=request.session_id,
+            session_version=session.version,
         )
 
     def _get_session(self, session_id: str) -> CloudSession:

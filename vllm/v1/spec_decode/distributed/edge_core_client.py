@@ -337,6 +337,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
         self._cancel_request_tasks(request_ids)
         for request_id in request_ids:
             self._sessions.pop(request_id, None)
+            self._draft_runner.close_session(request_id)
             with contextlib.suppress(Exception):
                 await self._verifier.close_session(
                     CloseSessionRequest(session_id=request_id)
@@ -484,6 +485,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
                 raise
             except Exception:
                 pass
+            self._draft_runner.close_session(request.request_id)
             self._tasks.pop(request.request_id, None)
             self._sessions.pop(request.request_id, None)
 
@@ -582,6 +584,7 @@ class DistributedSpecEdgeCoreClient(EngineCoreClient):
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
         self._sessions.clear()
+        self._draft_runner.clear_sessions()
         await self._verifier.close()
 
     def _cancel_request_tasks(self, request_ids: list[str]) -> None:
