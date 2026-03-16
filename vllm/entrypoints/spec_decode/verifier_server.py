@@ -9,8 +9,13 @@ from dataclasses import dataclass
 import msgspec.msgpack
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
 
 from vllm.logger import init_logger
+from vllm.v1.spec_decode.distributed.errors import (
+    VerifierQueueTimeoutError,
+    VerifierSessionMissingError,
+)
 from vllm.v1.spec_decode.distributed.protocol import (
     CloseSessionRequest,
     DraftProposal,
@@ -65,6 +70,22 @@ def build_app(args: VerifierServerArgs) -> FastAPI:
         await core.shutdown()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.exception_handler(VerifierSessionMissingError)
+    async def handle_missing_session(
+        _request: Request,
+        exc: VerifierSessionMissingError,
+    ) -> PlainTextResponse:
+        return PlainTextResponse(str(exc), status_code=409)
+
+    @app.exception_handler(TimeoutError)
+    async def handle_timeout(
+        _request: Request,
+        exc: TimeoutError,
+    ) -> PlainTextResponse:
+        if isinstance(exc, VerifierQueueTimeoutError):
+            return PlainTextResponse(str(exc), status_code=408)
+        return PlainTextResponse(str(exc), status_code=500)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

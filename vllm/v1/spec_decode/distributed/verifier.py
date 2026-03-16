@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.spec_decode.distributed.errors import VerifierSessionMissingError
 from vllm.v1.spec_decode.distributed.logprobs import pack_sample_logprobs
 from vllm.v1.spec_decode.distributed.protocol import (
     CloseSessionRequest,
@@ -272,7 +273,37 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
         self,
         request: ResyncSessionRequest,
     ) -> ResyncSessionResponse:
-        session = self._get_session(request.session_id)
+        session = self._sessions.get(request.session_id)
+        if session is None:
+            if request.sampling_metadata is None:
+                raise VerifierSessionMissingError(
+                    "Cannot recreate a missing verifier session without "
+                    "sampling metadata."
+                )
+            seed = request.sampling_metadata.seed
+            if seed is None:
+                seed = torch.seed()
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(int(seed) + 1)
+            runtime_state = None
+            if request.accepted_prefix_token_ids:
+                runtime_state = self.build_runtime_state(
+                    request.accepted_prefix_token_ids
+                )
+            session = CloudSession(
+                session_id=request.session_id,
+                prompt_len=request.prompt_len,
+                accepted_prefix_token_ids=list(request.accepted_prefix_token_ids),
+                version=request.edge_version,
+                sampling=request.sampling_metadata,
+                generator=generator,
+                runtime_state=runtime_state,
+                structured_output_session=self._structured_output_factory.create_session(
+                    request.session_id,
+                    request.sampling_metadata,
+                ),
+            )
+            self._sessions[request.session_id] = session
         session.accepted_prefix_token_ids = list(request.accepted_prefix_token_ids)
         session.runtime_state = self.sync_runtime_state(
             session.runtime_state,
@@ -290,5 +321,7 @@ class TargetVerificationRunner(BaseCausalLMRuntime):
 
     def _get_session(self, session_id: str) -> CloudSession:
         if session_id not in self._sessions:
-            raise ValueError(f"Unknown verifier session {session_id}.")
+            raise VerifierSessionMissingError(
+                f"Unknown verifier session {session_id}."
+            )
         return self._sessions[session_id]

@@ -213,6 +213,8 @@ class ResyncSessionRequest(
     session_id: str
     accepted_prefix_token_ids: list[int]
     edge_version: int
+    prompt_len: int
+    sampling_metadata: SamplingMetadata | None = None
 
 
 class ResyncSessionResponse(

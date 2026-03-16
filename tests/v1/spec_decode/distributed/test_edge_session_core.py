@@ -9,6 +9,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest, FinishReason
+from vllm.v1.spec_decode.distributed.errors import VerifierSessionMissingError
 from vllm.v1.spec_decode.distributed.logprobs import pack_sample_logprobs
 from vllm.v1.spec_decode.distributed.edge_session import EdgeSessionCore
 from vllm.v1.spec_decode.distributed.protocol import (
@@ -205,6 +206,40 @@ class FakeVerifierClient:
         self.calls.append(("close_session", request.session_id))
 
 
+class FakeVerifierClientSessionLoss(FakeVerifierClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self._missing_once = True
+
+    async def verify_proposal(
+        self,
+        proposal: DraftProposal,
+    ) -> VerificationResult:
+        if self._missing_once and proposal.proposal_id == 0:
+            self._missing_once = False
+            self.calls.append(("verify_missing_session", proposal.proposal_id))
+            raise VerifierSessionMissingError("Unknown verifier session")
+        return await super().verify_proposal(proposal)
+
+    async def resync_session(
+        self,
+        request: ResyncSessionRequest,
+    ) -> ResyncSessionResponse:
+        self.calls.append(
+            (
+                "resync_session",
+                request.session_id,
+                list(request.accepted_prefix_token_ids),
+                request.prompt_len,
+                request.sampling_metadata is not None,
+            )
+        )
+        return ResyncSessionResponse(
+            session_id=request.session_id,
+            session_version=request.edge_version,
+        )
+
+
 @pytest.mark.asyncio
 async def test_edge_session_core_streams_verified_steps_and_tracks_registry():
     request = make_request(max_tokens=5)
@@ -288,3 +323,22 @@ async def test_edge_session_core_emits_prompt_logprobs_before_decode_steps():
         [3, 3],
     ]
     assert [step.new_token_ids for step in steps[1:]] == [[11, 12, 99], [77], [88]]
+
+
+@pytest.mark.asyncio
+async def test_edge_session_core_resyncs_when_verifier_loses_session():
+    request = make_request(request_id="request-session-loss", max_tokens=5)
+    draft_runner = FakeDraftRunner()
+    verifier = FakeVerifierClientSessionLoss()
+    core = EdgeSessionCore(draft_runner, verifier)
+
+    session = core.create_session(request)
+    steps = [step async for step in core.run_request(request, session)]
+
+    assert [step.new_token_ids for step in steps] == [[11, 12, 99], [77], [88]]
+    assert verifier.calls[:4] == [
+        ("open_session", request.request_id),
+        ("verify_missing_session", 0),
+        ("resync_session", request.request_id, [1, 2, 3], 3, True),
+        ("verify_proposal", 0, [11, 12]),
+    ]

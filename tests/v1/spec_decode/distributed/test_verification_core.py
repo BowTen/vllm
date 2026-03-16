@@ -15,6 +15,7 @@ from vllm.v1.spec_decode.distributed.protocol import (
     SamplingMetadata,
     VerificationResult,
 )
+from vllm.v1.spec_decode.distributed.errors import VerifierQueueTimeoutError
 from vllm.v1.spec_decode.distributed.verification_core import VerificationCore
 
 
@@ -163,6 +164,7 @@ async def test_verification_core_tracks_sessions_and_serializes_proposals():
             session_id=session_id,
             accepted_prefix_token_ids=[1, 2, 3, 10, 11],
             edge_version=5,
+            prompt_len=3,
         )
     )
     assert resync_response.session_version == 5
@@ -400,7 +402,7 @@ async def test_verification_core_times_out_stale_queued_proposals():
 
     result_0 = await task_0
     assert result_0.accepted_token_ids == [10]
-    with pytest.raises(TimeoutError, match="verifier queue"):
+    with pytest.raises(VerifierQueueTimeoutError, match="verifier queue"):
         await task_1
 
     assert core.registry.get("session-a").active_proposals == 0

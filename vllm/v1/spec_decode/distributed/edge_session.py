@@ -11,6 +11,7 @@ import torch
 
 from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.spec_decode.distributed.errors import VerifierSessionMissingError
 from vllm.v1.spec_decode.distributed.logprobs import (
     build_logprobs_lists,
     build_logprobs_tensors,
@@ -203,7 +204,13 @@ class EdgeSessionCore:
                 )
                 return
 
-            verification = await self._verifier.verify_proposal(proposal)
+            try:
+                verification = await self._verifier.verify_proposal(proposal)
+            except VerifierSessionMissingError:
+                await self._verifier.resync_session(
+                    self._build_resync_request(session)
+                )
+                verification = await self._verifier.verify_proposal(proposal)
             (
                 new_token_ids,
                 new_logprobs,
@@ -213,15 +220,7 @@ class EdgeSessionCore:
             ) = self._apply_verification_result(session, verification)
 
             if needs_resync and finish_reason is None:
-                await self._verifier.resync_session(
-                    ResyncSessionRequest(
-                        session_id=request.request_id,
-                        accepted_prefix_token_ids=list(
-                            session.accepted_prefix_token_ids
-                        ),
-                        edge_version=session.version,
-                    )
-                )
+                await self._verifier.resync_session(self._build_resync_request(session))
 
             yield EdgeStepResult(
                 request_id=request.request_id,
@@ -252,6 +251,18 @@ class EdgeSessionCore:
         self.clear_local_state()
         if self._structured_output_factory is not None:
             self._structured_output_factory.close()
+
+    def _build_resync_request(
+        self,
+        session: EdgeSessionState,
+    ) -> ResyncSessionRequest:
+        return ResyncSessionRequest(
+            session_id=session.request_id,
+            accepted_prefix_token_ids=list(session.accepted_prefix_token_ids),
+            edge_version=session.version,
+            prompt_len=session.prompt_len,
+            sampling_metadata=session.sampling,
+        )
 
     def _apply_verification_result(
         self,

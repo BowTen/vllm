@@ -28,6 +28,10 @@ from vllm.v1.engine import (
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.executor import Executor
+from vllm.v1.spec_decode.distributed.errors import (
+    VerifierQueueTimeoutError,
+    VerifierSessionMissingError,
+)
 from vllm.v1.spec_decode.distributed.edge_session import (
     EdgeSessionCore,
     EdgeSessionState,
@@ -92,6 +96,10 @@ class VerifierRPCClient:
             data=MSGPACK_ENCODER.encode(payload),
             headers={"content-type": "application/msgpack"},
         ) as response:
+            if response.status == 409:
+                raise VerifierSessionMissingError(await response.text())
+            if response.status == 408:
+                raise VerifierQueueTimeoutError(await response.text())
             response.raise_for_status()
             raw = await response.read()
         if response_type is type(None):

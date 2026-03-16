@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
+from vllm.v1.spec_decode.distributed.errors import VerifierQueueTimeoutError
 from vllm.v1.spec_decode.distributed.protocol import (
     CloseSessionRequest,
     DraftProposal,
@@ -265,7 +266,9 @@ class ProposalScheduler:
         if self._is_expired(item):
             if not item.future.done():
                 item.future.set_exception(
-                    TimeoutError("Proposal timed out in verifier queue.")
+                    VerifierQueueTimeoutError(
+                        "Proposal timed out in verifier queue."
+                    )
                 )
             return current_total_tokens
 

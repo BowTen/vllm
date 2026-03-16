@@ -368,6 +368,12 @@ Expected RPC surface:
 - `CloseSession`
 - `ResyncSession`
 
+Implementation update:
+
+- `ResyncSession` must carry enough metadata to recreate verifier-side runtime
+  state after session loss; in practice this means the accepted prefix, prompt
+  length, and sampling metadata are all needed
+
 ### `VerificationCore`
 
 Role:

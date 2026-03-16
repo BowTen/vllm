@@ -19,6 +19,7 @@ from vllm.entrypoints.spec_decode import verifier_server as verifier_server_mod
 from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.spec_decode.distributed import edge_core_client as edge_client_mod
+from vllm.v1.spec_decode.distributed.errors import VerifierSessionMissingError
 from vllm.v1.spec_decode.distributed.logprobs import pack_sample_logprobs
 from vllm.v1.spec_decode.distributed.protocol import (
     DraftProposal,
@@ -214,7 +215,13 @@ def _make_fake_target_runner(call_log: list[tuple[str, Any]]) -> type:
         async def resync_session(self, request) -> ResyncSessionResponse:
             self.sessions[request.session_id] = list(request.accepted_prefix_token_ids)
             call_log.append(
-                ("resync_session", request.session_id, list(request.accepted_prefix_token_ids))
+                (
+                    "resync_session",
+                    request.session_id,
+                    list(request.accepted_prefix_token_ids),
+                    request.prompt_len,
+                    request.sampling_metadata is not None,
+                )
             )
             return ResyncSessionResponse(
                 session_id=request.session_id,
@@ -222,6 +229,14 @@ def _make_fake_target_runner(call_log: list[tuple[str, Any]]) -> type:
             )
 
         async def verify_proposal(self, proposal: DraftProposal) -> VerificationResult:
+            if (
+                proposal.session_id == "request-session-loss"
+                and proposal.proposal_id == 0
+                and not getattr(self, "_missing_once_done", False)
+            ):
+                self._missing_once_done = True
+                call_log.append(("verify_missing_session", proposal.proposal_id))
+                raise VerifierSessionMissingError("Unknown verifier session")
             call_log.append(
                 ("verify_proposal", proposal.proposal_id, list(proposal.draft_token_ids))
             )
@@ -382,6 +397,8 @@ def _assert_common_call_log(call_log: list[tuple[str, Any]]) -> None:
     ]
     resync_call = call_log[3]
     assert resync_call[2][-1] == 77
+    assert resync_call[3] == 3
+    assert resync_call[4] is True
 
 
 def test_distributed_client_supports_sync_generate_path(
@@ -613,3 +630,32 @@ def test_distributed_client_supports_structured_outputs(
     assert fake_factory.created_sessions[0].grammar.accepted == [11, 12, 99, 77, 88]
     assert call_log[0] == ("open_session", "request-structured", "outlines")
     assert fake_factory.closed
+
+
+def test_distributed_client_resyncs_after_verifier_session_loss(
+    monkeypatch: pytest.MonkeyPatch,
+    verifier_server,
+) -> None:
+    base_url, call_log = verifier_server
+    monkeypatch.setattr(edge_client_mod, "EdgeDraftRunner", FakeDraftRunner)
+    client = EngineCoreClient.make_client(
+        multiprocess_mode=True,
+        asyncio_mode=False,
+        vllm_config=make_fake_vllm_config(base_url),
+        executor_class=object,
+        log_stats=False,
+    )
+    try:
+        client.add_request(make_request(request_id="request-session-loss", max_tokens=5))
+        tokens, finish_reason = _collect_outputs_sync(client)
+    finally:
+        client.shutdown()
+
+    assert tokens == [11, 12, 99, 77, 88]
+    assert finish_reason == FinishReason.LENGTH
+    assert call_log[:4] == [
+        ("open_session", "request-session-loss", None),
+        ("verify_missing_session", 0),
+        ("resync_session", "request-session-loss", [1, 2, 3], 3, True),
+        ("verify_proposal", 0, [11, 12]),
+    ]
