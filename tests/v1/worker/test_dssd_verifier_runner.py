@@ -245,6 +245,42 @@ def test_session_runner_verify_round_selects_non_none_collective_reply():
     assert result == expected
 
 
+def test_session_runner_verify_round_allows_empty_prompt_on_first_round():
+    expected = VerifierForwardResult(
+        verifier_session_id="vs-empty",
+        seq_no=0,
+        seq_probs=[[0.4, 0.6]],
+        bonus_probs=[0.7, 0.3],
+        finish_reason="gpu-replay-forward",
+    )
+    model_executor = types.SimpleNamespace(
+        collective_rpc=Mock(return_value=[expected]),
+    )
+    runner = DSSDSessionRunner(model_executor=model_executor)
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-empty",
+            binding_id="bind-1",
+            prompt_token_ids=[],
+            sampling_params_digest="sp-empty",
+        )
+    )
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-empty",
+        seq_no=0,
+        prefix_delta_token_ids=[],
+        draft_token_ids=[9],
+        q_values=[0.75],
+    )
+
+    result = runner.dssd_verify_round(request)
+
+    assert result == expected
+    called_request = model_executor.collective_rpc.call_args.kwargs["args"][0]
+    assert called_request.committed_token_ids == []
+
+
 def test_session_runner_verify_round_rejects_multiple_collective_replies():
     reply_a = VerifierForwardResult(
         verifier_session_id="vs-pp",
@@ -389,18 +425,22 @@ def test_build_verifier_replay_scheduler_output_uses_committed_prompt_and_spec_t
     assert new_req.sampling_params.max_tokens == 1
 
 
-def test_build_verifier_replay_request_view_rejects_empty_committed_prefix():
+def test_build_verifier_replay_request_view_allows_empty_committed_prefix():
     request = DSSDVerifierExecutionRequest(
         binding_id="bind-1",
         verifier_session_id="vs-3",
         seq_no=0,
         committed_token_ids=[],
-        draft_token_ids=[7],
-        q_values=[0.9],
+        draft_token_ids=[7, 8],
+        q_values=[0.9, 0.1],
     )
 
-    with pytest.raises(ValueError, match="committed_token_ids"):
-        build_verifier_replay_request_view(request, block_sizes=(16,))
+    view = build_verifier_replay_request_view(request, block_sizes=(16,))
+
+    assert view.prompt_token_ids == []
+    assert view.spec_token_ids == [7, 8]
+    assert view.num_scheduled_tokens == 2
+    assert view.block_ids == ([0],)
 
 
 def test_build_verifier_replay_request_view_rejects_empty_draft_token_ids():
@@ -515,6 +555,7 @@ def test_run_verifier_replay_forward_executes_model_and_cleans_up_batch_state():
         late_interaction_runner=types.SimpleNamespace(
             on_requests_finished=Mock(),
         ),
+        kv_connector_output=object(),
         _draft_token_ids=[99],
         _draft_token_req_ids=["old-req"],
     )
@@ -533,6 +574,7 @@ def test_run_verifier_replay_forward_executes_model_and_cleans_up_batch_state():
     assert "dssd-verify:vs-4:6" not in fake_runner.num_prompt_logprobs
     assert fake_runner.execute_model_state is None
     assert fake_runner.input_batch.prev_sampled_token_ids is None
+    assert fake_runner.kv_connector_output is None
     assert fake_runner._draft_token_ids is None
     assert fake_runner._draft_token_req_ids is None
     assert result.verifier_session_id == "vs-4"

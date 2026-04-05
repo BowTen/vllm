@@ -90,8 +90,6 @@ def build_verifier_replay_request_view(
     *,
     block_sizes: tuple[int, ...],
 ) -> DSSDVerifierReplayRequestView:
-    if not request.committed_token_ids:
-        raise ValueError("DSSD verifier replay requires committed_token_ids")
     if not request.draft_token_ids:
         raise ValueError("DSSD verifier replay requires draft_token_ids")
     if len(request.q_values) != len(request.draft_token_ids):
@@ -219,6 +217,7 @@ def run_verifier_replay_forward(
         )
     finally:
         model_runner.execute_model_state = None
+        model_runner.kv_connector_output = None
         model_runner._draft_token_ids = None
         model_runner._draft_token_req_ids = None
         model_runner.input_batch.prev_sampled_token_ids = None
