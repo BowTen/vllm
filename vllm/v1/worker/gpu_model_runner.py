@@ -6713,6 +6713,9 @@ class GPUModelRunner(
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
 
+    def dssd_verify_round(self, request: Any) -> Any:
+        return request
+
 
 @dataclass
 class EncoderTimingStats:
