@@ -57,6 +57,15 @@ class VerifyRoundRequest(msgspec.Struct, omit_defaults=True):
     q_values: list[float]
 
 
+class VerifierForwardResult(msgspec.Struct, omit_defaults=True):
+    verifier_session_id: str
+    seq_no: int
+    seq_probs: list[list[float]]
+    bonus_probs: list[float]
+    finished: bool = False
+    finish_reason: str | None = None
+
+
 class VerifyRoundResponse(msgspec.Struct, omit_defaults=True):
     verifier_session_id: str
     seq_no: int

@@ -143,6 +143,12 @@ class WorkerBase:
         """Should be called immediately after execute_model iff it returned None."""
         raise NotImplementedError
 
+    def dssd_draft_round(self, request: Any) -> Any:
+        return self._run_dssd_hook("dssd_draft_round", request)
+
+    def dssd_verify_round(self, request: Any) -> Any:
+        return self._run_dssd_hook("dssd_verify_round", request)
+
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
@@ -169,6 +175,17 @@ class WorkerBase:
     def shutdown(self) -> None:
         """Clean up resources held by the worker."""
         return
+
+    def _run_dssd_hook(self, hook_name: str, request: Any) -> Any:
+        model_runner = self.model_runner
+        if model_runner is None:
+            raise RuntimeError("Worker model_runner is not initialized")
+        hook = getattr(model_runner, hook_name, None)
+        if not callable(hook):
+            raise NotImplementedError(
+                f"Model runner does not implement {hook_name!r}."
+            )
+        return hook(request)
 
 
 class WorkerWrapperBase:

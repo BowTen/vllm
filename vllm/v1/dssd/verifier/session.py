@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from time import time
 from typing import Any
@@ -16,6 +17,7 @@ class DSSDVerifierSessionState:
     seq_no: int = -1
     committed_token_ids: list[int] = field(default_factory=list)
     last_response_cache: dict[int, Any] = field(default_factory=dict)
+    rng: random.Random = field(default_factory=random.Random, repr=False)
     last_activity_at: float = field(default_factory=time)
 
 
@@ -36,6 +38,7 @@ class DSSDVerifierSessionManager:
             binding_id=binding_id,
             sampling_params_fingerprint=sampling_params_fingerprint,
             committed_token_ids=list(prompt_token_ids or []),
+            rng=random.Random(verifier_session_id),
         )
 
     def get_session(self, verifier_session_id: str) -> DSSDVerifierSessionState:

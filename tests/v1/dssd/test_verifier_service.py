@@ -55,6 +55,7 @@ BindVerifierRequest = protocol_module.BindVerifierRequest
 CreateSessionRequest = protocol_module.CreateSessionRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifyRoundResponse = protocol_module.VerifyRoundResponse
+VerifierForwardResult = protocol_module.VerifierForwardResult
 DSSDVerifierService = service_module.DSSDVerifierService
 
 
@@ -119,3 +120,138 @@ async def test_verifier_service_retries_failed_round_without_dup_prefix_delta():
 
     assert response.accepted_count == 1
     assert session.committed_token_ids == [10, 99]
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_builds_reject_response_from_forward_probs():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+
+        async def dssd_verify_round_async(self, request):
+            return VerifierForwardResult(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                seq_probs=[[0.1, 0.9], [0.2, 0.8]],
+                bonus_probs=[0.3, 0.7],
+            )
+
+    class _FixedRNG:
+        def __init__(self, draws: list[float]) -> None:
+            self._draws = iter(draws)
+
+        def random(self) -> float:
+            return next(self._draws)
+
+    service = DSSDVerifierService(
+        _Engine(),
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response = await service.bind_verifier(
+        BindVerifierRequest(
+            protocol_version="v1alpha1",
+            edge_instance_id="edge-1",
+            tokenizer_hash="tok",
+            vocab_hash="voc",
+            supported_gamma_max=2,
+        )
+    )
+    session_response = await service.create_session(
+        CreateSessionRequest(
+            binding_id=bind_response.binding_id,
+            request_id="req-2",
+            prompt_token_ids=[10],
+            sampling_params_digest="sp-2",
+            max_new_tokens=4,
+            stop_token_ids=[],
+        )
+    )
+    service.session_manager.get_session(session_response.verifier_session_id).rng = (
+        _FixedRNG([0.05, 0.5])
+    )
+
+    response = await service.verify_round(
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_response.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[1, 0],
+            q_values=[0.8, 0.5],
+        )
+    )
+
+    assert response.accepted_count == 1
+    assert response.all_accepted is False
+    assert response.reject_index == 1
+    assert response.reject_target_probs == [0.2, 0.8]
+    assert response.bonus_token_id is None
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_builds_bonus_token_from_forward_probs():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+
+        async def dssd_verify_round_async(self, request):
+            return VerifierForwardResult(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                seq_probs=[[0.1, 0.9]],
+                bonus_probs=[0.2, 0.8],
+            )
+
+    class _FixedRNG:
+        def __init__(self, draws: list[float]) -> None:
+            self._draws = iter(draws)
+
+        def random(self) -> float:
+            return next(self._draws)
+
+    service = DSSDVerifierService(
+        _Engine(),
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=1),
+        ),
+    )
+    bind_response = await service.bind_verifier(
+        BindVerifierRequest(
+            protocol_version="v1alpha1",
+            edge_instance_id="edge-1",
+            tokenizer_hash="tok",
+            vocab_hash="voc",
+            supported_gamma_max=1,
+        )
+    )
+    session_response = await service.create_session(
+        CreateSessionRequest(
+            binding_id=bind_response.binding_id,
+            request_id="req-3",
+            prompt_token_ids=[11],
+            sampling_params_digest="sp-3",
+            max_new_tokens=4,
+            stop_token_ids=[],
+        )
+    )
+    service.session_manager.get_session(session_response.verifier_session_id).rng = (
+        _FixedRNG([0.1, 0.3])
+    )
+
+    response = await service.verify_round(
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_response.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[1],
+            q_values=[0.4],
+        )
+    )
+
+    assert response.accepted_count == 1
+    assert response.all_accepted is True
+    assert response.bonus_token_id == 1
+    assert response.reject_index is None

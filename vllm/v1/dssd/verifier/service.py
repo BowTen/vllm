@@ -14,6 +14,7 @@ from vllm.v1.dssd.protocol import (
     CloseSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    VerifierForwardResult,
     VerifyRoundRequest,
     VerifyRoundResponse,
 )
@@ -95,9 +96,12 @@ class DSSDVerifierService:
             request.seq_no,
         )
 
-        response = await self.engine_client.dssd_verify_round_async(request)
-        if not isinstance(response, VerifyRoundResponse):
-            response = msgspec.convert(response, type=VerifyRoundResponse)
+        raw_response = await self.engine_client.dssd_verify_round_async(request)
+        response = self._coerce_verify_response(
+            request=request,
+            raw_response=raw_response,
+            session=session,
+        )
         self.session_manager.append_prefix_delta(
             request.verifier_session_id,
             request.prefix_delta_token_ids,
@@ -123,6 +127,98 @@ class DSSDVerifierService:
     def _ensure_binding(self, binding_id: str) -> None:
         if binding_id not in self._bindings:
             raise ValueError("unknown verifier binding")
+
+    def _coerce_verify_response(
+        self,
+        *,
+        request: VerifyRoundRequest,
+        raw_response,
+        session,
+    ) -> VerifyRoundResponse:
+        if isinstance(raw_response, VerifyRoundResponse):
+            return raw_response
+        if not isinstance(raw_response, VerifierForwardResult):
+            raw_response = msgspec.convert(raw_response, type=VerifierForwardResult)
+        return self._build_verify_response_from_forward(
+            request=request,
+            forward_result=raw_response,
+            session=session,
+        )
+
+    def _build_verify_response_from_forward(
+        self,
+        *,
+        request: VerifyRoundRequest,
+        forward_result: VerifierForwardResult,
+        session,
+    ) -> VerifyRoundResponse:
+        if len(forward_result.seq_probs) != len(request.draft_token_ids):
+            raise ValueError("verifier forward result length does not match draft")
+
+        accepted_count = 0
+        for index, (draft_token_id, q_value, seq_probs) in enumerate(
+            zip(
+                request.draft_token_ids,
+                request.q_values,
+                forward_result.seq_probs,
+                strict=True,
+            )
+        ):
+            p_value = self._get_token_probability(seq_probs, draft_token_id)
+            accept_prob = self._accept_prob(p_value, q_value)
+            if session.rng.random() < accept_prob:
+                accepted_count += 1
+                continue
+            return VerifyRoundResponse(
+                verifier_session_id=forward_result.verifier_session_id,
+                seq_no=forward_result.seq_no,
+                accepted_count=accepted_count,
+                all_accepted=False,
+                reject_index=index,
+                reject_target_probs=list(seq_probs),
+                finished=forward_result.finished,
+                finish_reason=forward_result.finish_reason,
+            )
+
+        bonus_token_id = self._sample_token_id(session.rng, forward_result.bonus_probs)
+        return VerifyRoundResponse(
+            verifier_session_id=forward_result.verifier_session_id,
+            seq_no=forward_result.seq_no,
+            accepted_count=accepted_count,
+            all_accepted=True,
+            bonus_token_id=bonus_token_id,
+            finished=forward_result.finished,
+            finish_reason=forward_result.finish_reason,
+        )
+
+    def _get_token_probability(self, seq_probs: list[float], token_id: int) -> float:
+        if token_id < 0 or token_id >= len(seq_probs):
+            raise ValueError("draft token id is out of bounds for verifier probs")
+        return float(seq_probs[token_id])
+
+    def _accept_prob(self, p_value: float, q_value: float) -> float:
+        if q_value <= 0:
+            return 1.0
+        return max(0.0, min(1.0, p_value / q_value))
+
+    def _sample_token_id(self, rng, probs: list[float]) -> int | None:
+        if not probs:
+            return None
+        total = 0.0
+        for prob in probs:
+            if prob < 0:
+                raise ValueError("bonus probabilities must be non-negative")
+            total += prob
+        if total <= 0:
+            raise ValueError("bonus probabilities must have positive mass")
+
+        threshold = rng.random() * total
+        cumulative = 0.0
+        for token_id, prob in enumerate(probs):
+            cumulative += prob
+            if threshold < cumulative:
+                return token_id
+        return len(probs) - 1
 
     def _tokenizer_hash(self) -> str:
         tokenizer = self._tokenizer_for_fingerprint()
