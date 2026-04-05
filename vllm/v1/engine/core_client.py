@@ -34,6 +34,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.dssd.protocol import (
     CloseSessionRequest,
     DraftRoundRequest,
+    VerifierCommitRequest,
     VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
@@ -279,6 +280,11 @@ class EngineCoreClient(ABC):
 
     async def dssd_close_verifier_session_async(
         self, request: CloseSessionRequest
+    ) -> bool:
+        raise NotImplementedError
+
+    async def dssd_commit_verifier_tokens_async(
+        self, request: VerifierCommitRequest
     ) -> bool:
         raise NotImplementedError
 
@@ -1188,6 +1194,11 @@ class AsyncMPClient(MPClient):
         self, request: CloseSessionRequest
     ) -> bool:
         return await self.call_utility_async("dssd_close_verifier_session", request)
+
+    async def dssd_commit_verifier_tokens_async(
+        self, request: VerifierCommitRequest
+    ) -> bool:
+        return await self.call_utility_async("dssd_commit_verifier_tokens", request)
 
     async def dssd_draft_round_async(
         self, request: DraftRoundRequest

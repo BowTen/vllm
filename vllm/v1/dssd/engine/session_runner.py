@@ -12,6 +12,7 @@ from vllm.v1.dssd.engine.session_store import DSSDSessionStore
 from vllm.v1.dssd.protocol import (
     CloseSessionRequest,
     DraftRoundRequest,
+    VerifierCommitRequest,
     VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
@@ -64,6 +65,16 @@ class DSSDSessionRunner:
         self.verifier_sessions.delete(request.verifier_session_id)
         return True
 
+    def commit_verifier_tokens(self, request: VerifierCommitRequest) -> bool:
+        if not isinstance(request, VerifierCommitRequest):
+            raise TypeError("commit_verifier_tokens expects VerifierCommitRequest")
+        state = self.verifier_sessions.get(request.verifier_session_id)
+        if state is None:
+            return False
+        if request.token_ids:
+            state.committed_token_ids.extend(request.token_ids)
+        return True
+
     def dssd_draft_round(self, request: DraftRoundRequest) -> DraftRoundResult:
         if not isinstance(request, DraftRoundRequest):
             raise TypeError("dssd_draft_round expects DraftRoundRequest")
@@ -83,27 +94,30 @@ class DSSDSessionRunner:
     def dssd_verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
-        session_state = self.verifier_sessions.get(request.verifier_session_id)
-        if session_state is not None and request.prefix_delta_token_ids:
-            session_state.committed_token_ids.extend(request.prefix_delta_token_ids)
         if self.model_executor is not None:
             result = self.model_executor.collective_rpc(
                 "dssd_verify_round",
                 args=(request,),
             )
-            return result[0]
-        vocab_size = max(request.draft_token_ids, default=0) + 1
-        vocab_size = max(vocab_size, 1)
-        target_probs = []
-        for token_id in request.draft_token_ids:
-            probs = [0.0] * vocab_size
-            probs[token_id] = 1.0
-            target_probs.append(probs)
-        bonus_probs = [0.0] * vocab_size
-        bonus_probs[0] = 1.0
-        target_probs.append(bonus_probs)
-        return build_verifier_result(
-            request=request,
-            target_probs=target_probs,
-            finish_reason="placeholder-forward",
-        )
+            response = result[0]
+        else:
+            vocab_size = max(request.draft_token_ids, default=0) + 1
+            vocab_size = max(vocab_size, 1)
+            target_probs = []
+            for token_id in request.draft_token_ids:
+                probs = [0.0] * vocab_size
+                probs[token_id] = 1.0
+                target_probs.append(probs)
+            bonus_probs = [0.0] * vocab_size
+            bonus_probs[0] = 1.0
+            target_probs.append(bonus_probs)
+            response = build_verifier_result(
+                request=request,
+                target_probs=target_probs,
+                finish_reason="placeholder-forward",
+            )
+
+        session_state = self.verifier_sessions.get(request.verifier_session_id)
+        if session_state is not None and request.prefix_delta_token_ids:
+            session_state.committed_token_ids.extend(request.prefix_delta_token_ids)
+        return response

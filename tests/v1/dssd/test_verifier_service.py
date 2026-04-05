@@ -57,6 +57,7 @@ VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifyRoundResponse = protocol_module.VerifyRoundResponse
 VerifierForwardResult = protocol_module.VerifierForwardResult
 VerifierSessionInitRequest = protocol_module.VerifierSessionInitRequest
+VerifierCommitRequest = protocol_module.VerifierCommitRequest
 DSSDVerifierService = service_module.DSSDVerifierService
 
 
@@ -120,7 +121,7 @@ async def test_verifier_service_retries_failed_round_without_dup_prefix_delta():
     session = service.session_manager.get_session(session_response.verifier_session_id)
 
     assert response.accepted_count == 1
-    assert session.committed_token_ids == [10, 99]
+    assert session.committed_token_ids == [10, 99, 3, 9]
 
 
 @pytest.mark.asyncio
@@ -128,8 +129,13 @@ async def test_verifier_service_builds_reject_response_from_forward_probs():
     class _Engine:
         def __init__(self) -> None:
             self.model_config = SimpleNamespace(model="target-model")
+            self.commit_requests = []
 
         async def dssd_create_verifier_session_async(self, request):
+            return True
+
+        async def dssd_commit_verifier_tokens_async(self, request):
+            self.commit_requests.append(request)
             return True
 
         async def dssd_verify_round_async(self, request):
@@ -192,6 +198,13 @@ async def test_verifier_service_builds_reject_response_from_forward_probs():
     assert response.reject_index == 1
     assert response.reject_target_probs == [0.2, 0.8]
     assert response.bonus_token_id is None
+    assert service.session_manager.get_session(
+        session_response.verifier_session_id
+    ).committed_token_ids == [10, 1]
+    assert len(service.engine_client.commit_requests) == 1
+    commit_request = service.engine_client.commit_requests[0]
+    assert isinstance(commit_request, VerifierCommitRequest)
+    assert commit_request.token_ids == [1]
 
 
 @pytest.mark.asyncio
@@ -199,8 +212,13 @@ async def test_verifier_service_builds_bonus_token_from_forward_probs():
     class _Engine:
         def __init__(self) -> None:
             self.model_config = SimpleNamespace(model="target-model")
+            self.commit_requests = []
 
         async def dssd_create_verifier_session_async(self, request):
+            return True
+
+        async def dssd_commit_verifier_tokens_async(self, request):
+            self.commit_requests.append(request)
             return True
 
         async def dssd_verify_round_async(self, request):
@@ -262,6 +280,11 @@ async def test_verifier_service_builds_bonus_token_from_forward_probs():
     assert response.all_accepted is True
     assert response.bonus_token_id == 1
     assert response.reject_index is None
+    assert service.session_manager.get_session(
+        session_response.verifier_session_id
+    ).committed_token_ids == [11, 1, 1]
+    assert len(service.engine_client.commit_requests) == 1
+    assert service.engine_client.commit_requests[0].token_ids == [1, 1]
 
 
 @pytest.mark.asyncio

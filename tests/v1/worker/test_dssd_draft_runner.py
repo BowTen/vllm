@@ -61,6 +61,7 @@ DSSDEdgeSessionState = edge_session_module.DSSDEdgeSessionState
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
 DraftRoundRequest = protocol_module.DraftRoundRequest
 VerifierSessionInitRequest = protocol_module.VerifierSessionInitRequest
+VerifierCommitRequest = protocol_module.VerifierCommitRequest
 CloseSessionRequest = protocol_module.CloseSessionRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
@@ -164,3 +165,75 @@ def test_session_runner_tracks_verifier_sessions():
 
     assert closed is True
     assert runner.verifier_sessions.get("vs-1") is None
+
+
+def test_session_runner_commits_verifier_tokens_after_round():
+    runner = DSSDSessionRunner()
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-1",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params_digest="sp-1",
+        )
+    )
+
+    committed = runner.commit_verifier_tokens(
+        VerifierCommitRequest(
+            verifier_session_id="vs-1",
+            token_ids=[7, 8],
+        )
+    )
+
+    assert committed is True
+    state = runner.verifier_sessions.get("vs-1")
+    assert state is not None
+    assert state.committed_token_ids == [1, 2, 3, 7, 8]
+
+
+def test_session_runner_applies_prefix_delta_once_after_successful_verify():
+    class _FailOnceExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def collective_rpc(self, method, args=(), **kwargs):
+            del method, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary failure")
+            return [VerifierForwardResult(
+                verifier_session_id="vs-1",
+                seq_no=0,
+                seq_probs=[[0.0, 1.0]],
+                bonus_probs=[1.0, 0.0],
+            )]
+
+    runner = DSSDSessionRunner(model_executor=_FailOnceExecutor())
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-1",
+            binding_id="bind-1",
+            prompt_token_ids=[1],
+            sampling_params_digest="sp-1",
+        )
+    )
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=0,
+        prefix_delta_token_ids=[9],
+        draft_token_ids=[1],
+        q_values=[0.5],
+    )
+
+    try:
+        runner.dssd_verify_round(request)
+    except RuntimeError as exc:
+        assert "temporary failure" in str(exc)
+
+    state = runner.verifier_sessions.get("vs-1")
+    assert state is not None
+    assert state.committed_token_ids == [1]
+
+    runner.dssd_verify_round(request)
+    assert state.committed_token_ids == [1, 9]

@@ -14,6 +14,7 @@ from vllm.v1.dssd.protocol import (
     CloseSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    VerifierCommitRequest,
     VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
@@ -121,6 +122,19 @@ class DSSDVerifierService:
             seq_no=request.seq_no,
             response=response,
         )
+        committed_token_ids = self._committed_token_ids_for_round(request, response)
+        if committed_token_ids:
+            self.session_manager.commit_tokens(
+                request.verifier_session_id,
+                committed_token_ids,
+            )
+            if hasattr(self.engine_client, "dssd_commit_verifier_tokens_async"):
+                await self.engine_client.dssd_commit_verifier_tokens_async(
+                    VerifierCommitRequest(
+                        verifier_session_id=request.verifier_session_id,
+                        token_ids=committed_token_ids,
+                    )
+                )
         self.session_manager.update_seq_no(
             request.verifier_session_id,
             request.seq_no,
@@ -235,6 +249,16 @@ class DSSDVerifierService:
             if threshold < cumulative:
                 return token_id
         return len(probs) - 1
+
+    def _committed_token_ids_for_round(
+        self,
+        request: VerifyRoundRequest,
+        response: VerifyRoundResponse,
+    ) -> list[int]:
+        committed = list(request.draft_token_ids[: response.accepted_count])
+        if response.all_accepted and response.bonus_token_id is not None:
+            committed.append(response.bonus_token_id)
+        return committed
 
     def _tokenizer_hash(self) -> str:
         tokenizer = self._tokenizer_for_fingerprint()

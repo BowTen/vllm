@@ -76,3 +76,11 @@ class DSSDVerifierSessionManager:
         if prefix_delta_token_ids:
             session.committed_token_ids.extend(prefix_delta_token_ids)
         session.last_activity_at = time()
+
+    def commit_tokens(
+        self, verifier_session_id: str, token_ids: list[int]
+    ) -> None:
+        session = self.get_session(verifier_session_id)
+        if token_ids:
+            session.committed_token_ids.extend(token_ids)
+        session.last_activity_at = time()

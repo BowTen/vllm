@@ -40,6 +40,7 @@ from vllm.v1.dssd.engine.session_runner import DSSDSessionRunner
 from vllm.v1.dssd.protocol import (
     CloseSessionRequest,
     DraftRoundRequest,
+    VerifierCommitRequest,
     VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
@@ -310,6 +311,9 @@ class EngineCore:
 
     def dssd_close_verifier_session(self, request: CloseSessionRequest) -> bool:
         return self.dssd_session_runner.close_verifier_session(request)
+
+    def dssd_commit_verifier_tokens(self, request: VerifierCommitRequest) -> bool:
+        return self.dssd_session_runner.commit_verifier_tokens(request)
 
     def dssd_draft_round(
         self, request: DraftRoundRequest

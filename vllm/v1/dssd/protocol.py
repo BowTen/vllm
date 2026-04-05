@@ -47,6 +47,11 @@ class VerifierSessionInitRequest(msgspec.Struct, omit_defaults=True):
     sampling_params_digest: str
 
 
+class VerifierCommitRequest(msgspec.Struct, omit_defaults=True):
+    verifier_session_id: str
+    token_ids: list[int]
+
+
 class DraftRoundRequest(msgspec.Struct, omit_defaults=True):
     local_session_id: str
     prompt_token_ids: list[int]

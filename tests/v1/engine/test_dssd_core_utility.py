@@ -169,6 +169,7 @@ core_client_module = _load_module(
 
 VerifyRoundRequest = protocol.VerifyRoundRequest
 VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
+VerifierCommitRequest = protocol.VerifierCommitRequest
 CloseSessionRequest = protocol.CloseSessionRequest
 DraftRoundRequest = protocol.DraftRoundRequest
 DSSDSessionStore = session_store_module.DSSDSessionStore
@@ -249,6 +250,24 @@ async def test_async_client_exposes_close_verifier_session_utility():
     assert result is True
     client.call_utility_async.assert_awaited_once_with(
         "dssd_close_verifier_session", request
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_client_exposes_commit_verifier_tokens_utility():
+    client = object.__new__(AsyncMPClient)
+    client.call_utility_async = AsyncMock(return_value=True)
+
+    request = VerifierCommitRequest(
+        verifier_session_id="vs-1",
+        token_ids=[7, 8],
+    )
+
+    result = await AsyncMPClient.dssd_commit_verifier_tokens_async(client, request)
+
+    assert result is True
+    client.call_utility_async.assert_awaited_once_with(
+        "dssd_commit_verifier_tokens", request
     )
 
 
