@@ -38,7 +38,9 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.dssd.engine.session_runner import DSSDSessionRunner
 from vllm.v1.dssd.protocol import (
+    CloseSessionRequest,
     DraftRoundRequest,
+    VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
 )
@@ -300,6 +302,14 @@ class EngineCore:
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
         return self.dssd_session_runner.dssd_verify_round(request)
+
+    def dssd_create_verifier_session(
+        self, request: VerifierSessionInitRequest
+    ) -> bool:
+        return self.dssd_session_runner.create_verifier_session(request)
+
+    def dssd_close_verifier_session(self, request: CloseSessionRequest) -> bool:
+        return self.dssd_session_runner.close_verifier_session(request)
 
     def dssd_draft_round(
         self, request: DraftRoundRequest

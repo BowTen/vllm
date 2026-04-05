@@ -60,6 +60,8 @@ DraftRoundResult = draft_runner_module.DraftRoundResult
 DSSDEdgeSessionState = edge_session_module.DSSDEdgeSessionState
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
 DraftRoundRequest = protocol_module.DraftRoundRequest
+VerifierSessionInitRequest = protocol_module.VerifierSessionInitRequest
+CloseSessionRequest = protocol_module.CloseSessionRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 
@@ -133,3 +135,32 @@ def test_session_runner_returns_typed_verify_round_response():
     assert result.seq_no == 2
     assert len(result.seq_probs) == 2
     assert len(result.bonus_probs) == 9
+
+
+def test_session_runner_tracks_verifier_sessions():
+    runner = DSSDSessionRunner()
+
+    created = runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-1",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params_digest="sp-1",
+        )
+    )
+
+    assert created is True
+    state = runner.verifier_sessions.get("vs-1")
+    assert state is not None
+    assert state.verifier_session_id == "vs-1"
+    assert state.committed_token_ids == [1, 2, 3]
+
+    closed = runner.close_verifier_session(
+        CloseSessionRequest(
+            verifier_session_id="vs-1",
+            reason="done",
+        )
+    )
+
+    assert closed is True
+    assert runner.verifier_sessions.get("vs-1") is None

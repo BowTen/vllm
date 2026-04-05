@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -85,10 +86,15 @@ def _install_core_client_stubs() -> None:
     )
     sys.modules["zmq.asyncio"] = zmq_asyncio
 
-    _install_module_stub("vllm.config", VllmConfig=object)
+    _install_module_stub(
+        "vllm.config",
+        VllmConfig=object,
+        set_current_vllm_config=lambda *_args, **_kwargs: nullcontext(),
+    )
     _install_module_stub("vllm.envs", VLLM_ENGINE_READY_TIMEOUT_S=60)
     _install_module_stub("vllm.logger", init_logger=lambda _name: _DummyLogger())
     _install_module_stub("vllm.lora.request", LoRARequest=object)
+    _install_module_stub("vllm.multimodal", MULTIMODAL_REGISTRY=object())
     _install_module_stub("vllm.tasks", SupportedTask=str)
     _install_module_stub("vllm.tracing", instrument=_noop_decorator)
     _install_module_stub("vllm.utils.async_utils", in_loop=lambda: False)
@@ -137,6 +143,7 @@ def _install_core_client_stubs() -> None:
         MsgpackDecoder=object,
         MsgpackEncoder=object,
         bytestr=bytes,
+        run_method=lambda obj, method, args, kwargs: getattr(obj, method)(*args, **kwargs),
     )
 
 
@@ -161,6 +168,8 @@ core_client_module = _load_module(
 )
 
 VerifyRoundRequest = protocol.VerifyRoundRequest
+VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
+CloseSessionRequest = protocol.CloseSessionRequest
 DraftRoundRequest = protocol.DraftRoundRequest
 DSSDSessionStore = session_store_module.DSSDSessionStore
 AsyncMPClient = core_client_module.AsyncMPClient
@@ -203,6 +212,44 @@ async def test_async_client_exposes_draft_round_utility():
 
     assert result == "draft-ok"
     client.call_utility_async.assert_awaited_once_with("dssd_draft_round", request)
+
+
+@pytest.mark.asyncio
+async def test_async_client_exposes_create_verifier_session_utility():
+    client = object.__new__(AsyncMPClient)
+    client.call_utility_async = AsyncMock(return_value=True)
+
+    request = VerifierSessionInitRequest(
+        verifier_session_id="vs-1",
+        binding_id="bind-1",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params_digest="sp-1",
+    )
+
+    result = await AsyncMPClient.dssd_create_verifier_session_async(client, request)
+
+    assert result is True
+    client.call_utility_async.assert_awaited_once_with(
+        "dssd_create_verifier_session", request
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_client_exposes_close_verifier_session_utility():
+    client = object.__new__(AsyncMPClient)
+    client.call_utility_async = AsyncMock(return_value=True)
+
+    request = CloseSessionRequest(
+        verifier_session_id="vs-1",
+        reason="done",
+    )
+
+    result = await AsyncMPClient.dssd_close_verifier_session_async(client, request)
+
+    assert result is True
+    client.call_utility_async.assert_awaited_once_with(
+        "dssd_close_verifier_session", request
+    )
 
 
 def test_session_store_round_trip():

@@ -56,6 +56,7 @@ CreateSessionRequest = protocol_module.CreateSessionRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifyRoundResponse = protocol_module.VerifyRoundResponse
 VerifierForwardResult = protocol_module.VerifierForwardResult
+VerifierSessionInitRequest = protocol_module.VerifierSessionInitRequest
 DSSDVerifierService = service_module.DSSDVerifierService
 
 
@@ -128,6 +129,9 @@ async def test_verifier_service_builds_reject_response_from_forward_probs():
         def __init__(self) -> None:
             self.model_config = SimpleNamespace(model="target-model")
 
+        async def dssd_create_verifier_session_async(self, request):
+            return True
+
         async def dssd_verify_round_async(self, request):
             return VerifierForwardResult(
                 verifier_session_id=request.verifier_session_id,
@@ -196,6 +200,9 @@ async def test_verifier_service_builds_bonus_token_from_forward_probs():
         def __init__(self) -> None:
             self.model_config = SimpleNamespace(model="target-model")
 
+        async def dssd_create_verifier_session_async(self, request):
+            return True
+
         async def dssd_verify_round_async(self, request):
             return VerifierForwardResult(
                 verifier_session_id=request.verifier_session_id,
@@ -255,3 +262,68 @@ async def test_verifier_service_builds_bonus_token_from_forward_probs():
     assert response.all_accepted is True
     assert response.bonus_token_id == 1
     assert response.reject_index is None
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_syncs_engine_session_lifecycle():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+            self.create_requests = []
+            self.close_requests = []
+
+        async def dssd_create_verifier_session_async(self, request):
+            self.create_requests.append(request)
+            return True
+
+        async def dssd_close_verifier_session_async(self, request):
+            self.close_requests.append(request)
+            return True
+
+    engine = _Engine()
+    service = DSSDVerifierService(
+        engine,
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response = await service.bind_verifier(
+        BindVerifierRequest(
+            protocol_version="v1alpha1",
+            edge_instance_id="edge-1",
+            tokenizer_hash="tok",
+            vocab_hash="voc",
+            supported_gamma_max=2,
+        )
+    )
+
+    session_response = await service.create_session(
+        CreateSessionRequest(
+            binding_id=bind_response.binding_id,
+            request_id="req-4",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params_digest="sp-4",
+            max_new_tokens=8,
+            stop_token_ids=[],
+        )
+    )
+
+    assert len(engine.create_requests) == 1
+    create_request = engine.create_requests[0]
+    assert isinstance(create_request, VerifierSessionInitRequest)
+    assert create_request.verifier_session_id == session_response.verifier_session_id
+    assert create_request.prompt_token_ids == [1, 2, 3]
+
+    close_response = await service.close_session(
+        protocol_module.CloseSessionRequest(
+            verifier_session_id=session_response.verifier_session_id,
+            reason="done",
+        )
+    )
+
+    assert close_response.closed is True
+    assert len(engine.close_requests) == 1
+    assert (
+        engine.close_requests[0].verifier_session_id
+        == session_response.verifier_session_id
+    )

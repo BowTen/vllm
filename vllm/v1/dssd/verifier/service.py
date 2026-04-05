@@ -14,6 +14,7 @@ from vllm.v1.dssd.protocol import (
     CloseSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
     VerifyRoundResponse,
@@ -64,6 +65,15 @@ class DSSDVerifierService:
     ) -> CreateSessionResponse:
         self._ensure_binding(request.binding_id)
         verifier_session_id = f"vs-{uuid4().hex}"
+        if hasattr(self.engine_client, "dssd_create_verifier_session_async"):
+            await self.engine_client.dssd_create_verifier_session_async(
+                VerifierSessionInitRequest(
+                    verifier_session_id=verifier_session_id,
+                    binding_id=request.binding_id,
+                    prompt_token_ids=request.prompt_token_ids,
+                    sampling_params_digest=request.sampling_params_digest,
+                )
+            )
         self.session_manager.create_session(
             verifier_session_id,
             binding_id=request.binding_id,
@@ -120,8 +130,14 @@ class DSSDVerifierService:
     async def close_session(
         self, request: CloseSessionRequest
     ) -> CloseSessionResponse:
+        engine_closed = True
+        if hasattr(self.engine_client, "dssd_close_verifier_session_async"):
+            engine_closed = await self.engine_client.dssd_close_verifier_session_async(
+                request
+            )
         return CloseSessionResponse(
-            closed=self.session_manager.delete_session(request.verifier_session_id)
+            closed=engine_closed
+            and self.session_manager.delete_session(request.verifier_session_id)
         )
 
     def _ensure_binding(self, binding_id: str) -> None:

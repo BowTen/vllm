@@ -3,18 +3,30 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.v1.dssd.edge.session import DSSDEdgeSessionState
 from vllm.v1.dssd.engine.batch_planner import VerifierRoundBatcher
 from vllm.v1.dssd.engine.session_store import DSSDSessionStore
 from vllm.v1.dssd.protocol import (
+    CloseSessionRequest,
     DraftRoundRequest,
+    VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
 )
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.dssd.worker.verifier_runner import build_verifier_result
+
+
+@dataclass
+class DSSDEngineVerifierSessionState:
+    verifier_session_id: str
+    binding_id: str
+    sampling_params_digest: str
+    prompt_token_ids: list[int]
+    committed_token_ids: list[int] = field(default_factory=list)
 
 
 class DSSDSessionRunner:
@@ -27,6 +39,30 @@ class DSSDSessionRunner:
 
     def create_edge_session(self, session_state: DSSDEdgeSessionState) -> None:
         self.edge_sessions.put(session_state.local_session_id, session_state)
+
+    def create_verifier_session(self, request: VerifierSessionInitRequest) -> bool:
+        if not isinstance(request, VerifierSessionInitRequest):
+            raise TypeError(
+                "create_verifier_session expects VerifierSessionInitRequest"
+            )
+        state = DSSDEngineVerifierSessionState(
+            verifier_session_id=request.verifier_session_id,
+            binding_id=request.binding_id,
+            sampling_params_digest=request.sampling_params_digest,
+            prompt_token_ids=list(request.prompt_token_ids),
+            committed_token_ids=list(request.prompt_token_ids),
+        )
+        self.verifier_sessions.put(request.verifier_session_id, state)
+        return True
+
+    def close_verifier_session(self, request: CloseSessionRequest) -> bool:
+        if not isinstance(request, CloseSessionRequest):
+            raise TypeError("close_verifier_session expects CloseSessionRequest")
+        state = self.verifier_sessions.get(request.verifier_session_id)
+        if state is None:
+            return False
+        self.verifier_sessions.delete(request.verifier_session_id)
+        return True
 
     def dssd_draft_round(self, request: DraftRoundRequest) -> DraftRoundResult:
         if not isinstance(request, DraftRoundRequest):
@@ -47,6 +83,9 @@ class DSSDSessionRunner:
     def dssd_verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
+        session_state = self.verifier_sessions.get(request.verifier_session_id)
+        if session_state is not None and request.prefix_delta_token_ids:
+            session_state.committed_token_ids.extend(request.prefix_delta_token_ids)
         if self.model_executor is not None:
             result = self.model_executor.collective_rpc(
                 "dssd_verify_round",

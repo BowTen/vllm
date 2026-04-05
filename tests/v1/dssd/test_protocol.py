@@ -40,6 +40,7 @@ transport = _load_module("vllm.v1.dssd.transport", DSSD_DIR / "transport.py")
 BindVerifierResponse = protocol.BindVerifierResponse
 DraftRoundRequest = protocol.DraftRoundRequest
 CreateSessionRequest = protocol.CreateSessionRequest
+VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
 VerifyRoundRequest = protocol.VerifyRoundRequest
 VerifierForwardResult = protocol.VerifierForwardResult
 VerifyRoundResponse = protocol.VerifyRoundResponse
@@ -106,6 +107,20 @@ def test_draft_round_request_msgpack_round_trip():
     restored = msgspec.msgpack.decode(
         msgspec.msgpack.encode(req),
         type=DraftRoundRequest,
+    )
+    assert restored == req
+
+
+def test_verifier_session_init_request_msgpack_round_trip():
+    req = VerifierSessionInitRequest(
+        verifier_session_id="vs-1",
+        binding_id="bind-1",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params_digest="sha256",
+    )
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(req),
+        type=VerifierSessionInitRequest,
     )
     assert restored == req
 

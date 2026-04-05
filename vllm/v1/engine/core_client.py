@@ -32,7 +32,9 @@ from vllm.utils.network_utils import (
     make_zmq_socket,
 )
 from vllm.v1.dssd.protocol import (
+    CloseSessionRequest,
     DraftRoundRequest,
+    VerifierSessionInitRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
 )
@@ -268,6 +270,16 @@ class EngineCoreClient(ABC):
     async def dssd_verify_round_async(
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
+        raise NotImplementedError
+
+    async def dssd_create_verifier_session_async(
+        self, request: VerifierSessionInitRequest
+    ) -> bool:
+        raise NotImplementedError
+
+    async def dssd_close_verifier_session_async(
+        self, request: CloseSessionRequest
+    ) -> bool:
         raise NotImplementedError
 
     async def dssd_draft_round_async(
@@ -1166,6 +1178,16 @@ class AsyncMPClient(MPClient):
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
         return await self.call_utility_async("dssd_verify_round", request)
+
+    async def dssd_create_verifier_session_async(
+        self, request: VerifierSessionInitRequest
+    ) -> bool:
+        return await self.call_utility_async("dssd_create_verifier_session", request)
+
+    async def dssd_close_verifier_session_async(
+        self, request: CloseSessionRequest
+    ) -> bool:
+        return await self.call_utility_async("dssd_close_verifier_session", request)
 
     async def dssd_draft_round_async(
         self, request: DraftRoundRequest
