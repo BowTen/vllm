@@ -42,6 +42,7 @@ DraftRoundRequest = protocol.DraftRoundRequest
 CreateSessionRequest = protocol.CreateSessionRequest
 VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
 VerifyRoundRequest = protocol.VerifyRoundRequest
+DSSDVerifierExecutionRequest = protocol.DSSDVerifierExecutionRequest
 VerifierForwardResult = protocol.VerifierForwardResult
 VerifyRoundResponse = protocol.VerifyRoundResponse
 DSSDTransport = transport.DSSDTransport
@@ -76,6 +77,23 @@ def test_verify_round_request_msgpack_round_trip():
     restored = msgspec.msgpack.decode(
         msgspec.msgpack.encode(req),
         type=VerifyRoundRequest,
+    )
+    assert restored == req
+
+
+def test_dssd_verifier_execution_request_msgpack_round_trip():
+    req = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=3,
+        committed_token_ids=[11, 22, 42],
+        draft_token_ids=[7, 8, 9],
+        q_values=[0.2, 0.3, 0.4],
+        prefix_delta_token_ids=[42],
+    )
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(req),
+        type=DSSDVerifierExecutionRequest,
     )
     assert restored == req
 

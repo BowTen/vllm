@@ -195,10 +195,12 @@ def test_session_runner_applies_prefix_delta_once_after_successful_verify():
     class _FailOnceExecutor:
         def __init__(self) -> None:
             self.calls = 0
+            self.requests = []
 
         def collective_rpc(self, method, args=(), **kwargs):
             del method, kwargs
             self.calls += 1
+            self.requests.append(args[0])
             if self.calls == 1:
                 raise RuntimeError("temporary failure")
             return [VerifierForwardResult(
@@ -237,3 +239,7 @@ def test_session_runner_applies_prefix_delta_once_after_successful_verify():
 
     runner.dssd_verify_round(request)
     assert state.committed_token_ids == [1, 9]
+    assert [req.committed_token_ids for req in runner.model_executor.requests] == [
+        [1, 9],
+        [1, 9],
+    ]

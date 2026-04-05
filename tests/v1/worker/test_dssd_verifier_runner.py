@@ -9,6 +9,8 @@ import types
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 import torch
 
 
@@ -49,12 +51,15 @@ verifier_runner_module = _load_module(
     "vllm.v1.dssd.worker.verifier_runner",
     DSSD_DIR / "worker" / "verifier_runner.py",
 )
-DSSDSessionRunner = _load_module(
+session_runner_module = _load_module(
     "vllm.v1.dssd.engine.session_runner",
     DSSD_DIR / "engine" / "session_runner.py",
-).DSSDSessionRunner
+)
+DSSDSessionRunner = session_runner_module.DSSDSessionRunner
 protocol_module = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
+DSSDVerifierExecutionRequest = session_runner_module.DSSDVerifierExecutionRequest
+VerifierSessionInitRequest = session_runner_module.VerifierSessionInitRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 build_verifier_result = verifier_runner_module.build_verifier_result
 build_verifier_result_from_logits = verifier_runner_module.build_verifier_result_from_logits
@@ -62,10 +67,11 @@ extract_forward_probs = verifier_runner_module.extract_forward_probs
 
 
 def test_build_verifier_result_preserves_forward_prob_slices():
-    request = VerifyRoundRequest(
+    request = DSSDVerifierExecutionRequest(
         binding_id="bind-1",
         verifier_session_id="vs-1",
         seq_no=2,
+        committed_token_ids=[1, 2, 3, 4],
         prefix_delta_token_ids=[4],
         draft_token_ids=[7, 8],
         q_values=[0.6, 0.4],
@@ -110,10 +116,11 @@ def test_extract_forward_probs_uses_target_and_bonus_indices():
 
 
 def test_build_verifier_result_from_logits_composes_helper_steps():
-    request = VerifyRoundRequest(
+    request = DSSDVerifierExecutionRequest(
         binding_id="bind-1",
         verifier_session_id="vs-2",
         seq_no=4,
+        committed_token_ids=[1, 2],
         prefix_delta_token_ids=[],
         draft_token_ids=[0, 1],
         q_values=[0.2, 0.4],
@@ -159,6 +166,14 @@ def test_session_runner_uses_collective_rpc_for_verify_round():
         collective_rpc=Mock(return_value=[expected]),
     )
     runner = DSSDSessionRunner(model_executor=model_executor)
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-1",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params_digest="sp-1",
+        )
+    )
     request = VerifyRoundRequest(
         binding_id="bind-1",
         verifier_session_id="vs-1",
@@ -171,7 +186,65 @@ def test_session_runner_uses_collective_rpc_for_verify_round():
     result = runner.dssd_verify_round(request)
 
     assert result == expected
+    model_executor.collective_rpc.assert_called_once()
+    called_request = model_executor.collective_rpc.call_args.kwargs["args"][0]
+    assert isinstance(called_request, DSSDVerifierExecutionRequest)
+    assert called_request.committed_token_ids == [1, 2, 3, 4]
+    assert called_request.draft_token_ids == [7, 8]
+    assert called_request.q_values == [0.6, 0.4]
     model_executor.collective_rpc.assert_called_once_with(
         "dssd_verify_round",
-        args=(request,),
+        args=(called_request,),
     )
+
+
+def test_session_runner_keeps_committed_prefix_stable_across_retry():
+    class _FailOnceExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.requests = []
+
+        def collective_rpc(self, method, args=(), **kwargs):
+            del method, kwargs
+            self.calls += 1
+            self.requests.append(args[0])
+            if self.calls == 1:
+                raise RuntimeError("temporary failure")
+            return [VerifierForwardResult(
+                verifier_session_id="vs-1",
+                seq_no=0,
+                seq_probs=[[0.0, 1.0]],
+                bonus_probs=[1.0, 0.0],
+            )]
+
+    runner = DSSDSessionRunner(model_executor=_FailOnceExecutor())
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-1",
+            binding_id="bind-1",
+            prompt_token_ids=[1],
+            sampling_params_digest="sp-1",
+        )
+    )
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=0,
+        prefix_delta_token_ids=[9],
+        draft_token_ids=[1],
+        q_values=[0.5],
+    )
+
+    with pytest.raises(RuntimeError, match="temporary failure"):
+        runner.dssd_verify_round(request)
+
+    state = runner.verifier_sessions.get("vs-1")
+    assert state is not None
+    assert state.committed_token_ids == [1]
+
+    runner.dssd_verify_round(request)
+    assert state.committed_token_ids == [1, 9]
+    assert [req.committed_token_ids for req in runner.model_executor.requests] == [
+        [1, 9],
+        [1, 9],
+    ]

@@ -126,6 +126,7 @@ worker_base_module = _load_module(
 
 DraftRoundRequest = protocol_module.DraftRoundRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
+DSSDVerifierExecutionRequest = protocol_module.DSSDVerifierExecutionRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 DraftRoundResult = draft_runner_module.DraftRoundResult
 run_method = serial_utils_module.run_method
@@ -171,10 +172,11 @@ def test_run_method_routes_dssd_draft_round_to_model_runner():
 
 
 def test_run_method_routes_dssd_verify_round_to_model_runner():
-    request = VerifyRoundRequest(
+    request = DSSDVerifierExecutionRequest(
         binding_id="bind-1",
         verifier_session_id="vs-1",
         seq_no=2,
+        committed_token_ids=[1, 2, 3, 4],
         prefix_delta_token_ids=[4],
         draft_token_ids=[7, 8],
         q_values=[0.6, 0.4],

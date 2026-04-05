@@ -11,6 +11,7 @@ from vllm.v1.dssd.engine.batch_planner import VerifierRoundBatcher
 from vllm.v1.dssd.engine.session_store import DSSDSessionStore
 from vllm.v1.dssd.protocol import (
     CloseSessionRequest,
+    DSSDVerifierExecutionRequest,
     DraftRoundRequest,
     VerifierCommitRequest,
     VerifierSessionInitRequest,
@@ -94,17 +95,18 @@ class DSSDSessionRunner:
     def dssd_verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
+        execution_request = self._build_verifier_execution_request(request)
         if self.model_executor is not None:
             result = self.model_executor.collective_rpc(
                 "dssd_verify_round",
-                args=(request,),
+                args=(execution_request,),
             )
             response = result[0]
         else:
-            vocab_size = max(request.draft_token_ids, default=0) + 1
+            vocab_size = max(execution_request.draft_token_ids, default=0) + 1
             vocab_size = max(vocab_size, 1)
             target_probs = []
-            for token_id in request.draft_token_ids:
+            for token_id in execution_request.draft_token_ids:
                 probs = [0.0] * vocab_size
                 probs[token_id] = 1.0
                 target_probs.append(probs)
@@ -112,7 +114,7 @@ class DSSDSessionRunner:
             bonus_probs[0] = 1.0
             target_probs.append(bonus_probs)
             response = build_verifier_result(
-                request=request,
+                request=execution_request,
                 target_probs=target_probs,
                 finish_reason="placeholder-forward",
             )
@@ -121,3 +123,21 @@ class DSSDSessionRunner:
         if session_state is not None and request.prefix_delta_token_ids:
             session_state.committed_token_ids.extend(request.prefix_delta_token_ids)
         return response
+
+    def _build_verifier_execution_request(
+        self, request: VerifyRoundRequest
+    ) -> DSSDVerifierExecutionRequest:
+        session_state = self.verifier_sessions.get(request.verifier_session_id)
+        committed_token_ids = []
+        if session_state is not None:
+            committed_token_ids.extend(session_state.committed_token_ids)
+        committed_token_ids.extend(request.prefix_delta_token_ids)
+        return DSSDVerifierExecutionRequest(
+            binding_id=request.binding_id,
+            verifier_session_id=request.verifier_session_id,
+            seq_no=request.seq_no,
+            committed_token_ids=committed_token_ids,
+            draft_token_ids=list(request.draft_token_ids),
+            q_values=list(request.q_values),
+            prefix_delta_token_ids=list(request.prefix_delta_token_ids),
+        )

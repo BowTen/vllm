@@ -69,6 +69,16 @@ class VerifyRoundRequest(msgspec.Struct, omit_defaults=True):
     q_values: list[float]
 
 
+class DSSDVerifierExecutionRequest(msgspec.Struct, omit_defaults=True):
+    binding_id: str
+    verifier_session_id: str
+    seq_no: int
+    committed_token_ids: list[int]
+    draft_token_ids: list[int]
+    q_values: list[float]
+    prefix_delta_token_ids: list[int] | None = None
+
+
 class VerifierForwardResult(msgspec.Struct, omit_defaults=True):
     verifier_session_id: str
     seq_no: int

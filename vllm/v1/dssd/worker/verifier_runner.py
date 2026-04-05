@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import torch
 
-from vllm.v1.dssd.protocol import VerifierForwardResult, VerifyRoundRequest
+from vllm.v1.dssd.protocol import (
+    DSSDVerifierExecutionRequest,
+    VerifierForwardResult,
+    VerifyRoundRequest,
+)
 
 
 def extract_forward_probs(
@@ -26,7 +30,7 @@ def extract_forward_probs(
 
 
 def build_verifier_result(
-    request: VerifyRoundRequest,
+    request: VerifyRoundRequest | DSSDVerifierExecutionRequest,
     target_probs: list[list[float]],
     *,
     finished: bool = False,
@@ -47,7 +51,7 @@ def build_verifier_result(
 
 def build_verifier_result_from_logits(
     *,
-    request: VerifyRoundRequest,
+    request: VerifyRoundRequest | DSSDVerifierExecutionRequest,
     logits: torch.Tensor,
     metadata,
     finished: bool = False,
