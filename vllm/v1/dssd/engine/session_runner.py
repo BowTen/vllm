@@ -139,5 +139,4 @@ class DSSDSessionRunner:
             committed_token_ids=committed_token_ids,
             draft_token_ids=list(request.draft_token_ids),
             q_values=list(request.q_values),
-            prefix_delta_token_ids=list(request.prefix_delta_token_ids),
         )

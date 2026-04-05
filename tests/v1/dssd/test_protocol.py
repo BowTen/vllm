@@ -89,13 +89,25 @@ def test_dssd_verifier_execution_request_msgpack_round_trip():
         committed_token_ids=[11, 22, 42],
         draft_token_ids=[7, 8, 9],
         q_values=[0.2, 0.3, 0.4],
-        prefix_delta_token_ids=[42],
     )
     restored = msgspec.msgpack.decode(
         msgspec.msgpack.encode(req),
         type=DSSDVerifierExecutionRequest,
     )
     assert restored == req
+
+
+def test_dssd_verifier_execution_request_rejects_prefix_delta():
+    with pytest.raises(TypeError):
+        DSSDVerifierExecutionRequest(
+            binding_id="bind-1",
+            verifier_session_id="vs-1",
+            seq_no=3,
+            committed_token_ids=[11, 22, 42],
+            draft_token_ids=[7, 8, 9],
+            q_values=[0.2, 0.3, 0.4],
+            prefix_delta_token_ids=[42],
+        )
 
 
 def test_create_session_request_msgpack_round_trip():

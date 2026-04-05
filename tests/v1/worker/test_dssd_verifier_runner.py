@@ -56,7 +56,7 @@ session_runner_module = _load_module(
     DSSD_DIR / "engine" / "session_runner.py",
 )
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
-protocol_module = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
+protocol_module = sys.modules["vllm.v1.dssd.protocol"]
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 DSSDVerifierExecutionRequest = session_runner_module.DSSDVerifierExecutionRequest
 VerifierSessionInitRequest = session_runner_module.VerifierSessionInitRequest
@@ -66,13 +66,18 @@ build_verifier_result_from_logits = verifier_runner_module.build_verifier_result
 extract_forward_probs = verifier_runner_module.extract_forward_probs
 
 
+def test_protocol_module_is_shared_with_session_runner_imports():
+    assert session_runner_module.VerifyRoundRequest is protocol_module.VerifyRoundRequest
+    assert (session_runner_module.DSSDVerifierExecutionRequest
+            is protocol_module.DSSDVerifierExecutionRequest)
+
+
 def test_build_verifier_result_preserves_forward_prob_slices():
     request = DSSDVerifierExecutionRequest(
         binding_id="bind-1",
         verifier_session_id="vs-1",
         seq_no=2,
         committed_token_ids=[1, 2, 3, 4],
-        prefix_delta_token_ids=[4],
         draft_token_ids=[7, 8],
         q_values=[0.6, 0.4],
     )
@@ -121,7 +126,6 @@ def test_build_verifier_result_from_logits_composes_helper_steps():
         verifier_session_id="vs-2",
         seq_no=4,
         committed_token_ids=[1, 2],
-        prefix_delta_token_ids=[],
         draft_token_ids=[0, 1],
         q_values=[0.2, 0.4],
     )
