@@ -4,15 +4,24 @@
 from .protocol import (
     BindVerifierRequest,
     BindVerifierResponse,
+    CloseSessionRequest,
+    CloseSessionResponse,
+    CreateSessionRequest,
+    CreateSessionResponse,
     VerifyRoundRequest,
     VerifyRoundResponse,
 )
-from .transport import DSSDTransport
+from .transport import DSSDTransport, HTTPDSSDTransport
 
 __all__ = [
     "BindVerifierRequest",
     "BindVerifierResponse",
+    "CloseSessionRequest",
+    "CloseSessionResponse",
+    "CreateSessionRequest",
+    "CreateSessionResponse",
     "DSSDTransport",
+    "HTTPDSSDTransport",
     "VerifyRoundRequest",
     "VerifyRoundResponse",
 ]

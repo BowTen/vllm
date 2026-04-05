@@ -42,6 +42,10 @@ edge_session_module = _load_module(
     "vllm.v1.dssd.edge.session",
     DSSD_EDGE_DIR / "session.py",
 )
+protocol_module = _load_module(
+    "vllm.v1.dssd.protocol",
+    DSSD_DIR / "protocol.py",
+)
 draft_runner_module = _load_module(
     "vllm.v1.dssd.worker.draft_runner",
     DSSD_DIR / "worker" / "draft_runner.py",
@@ -54,6 +58,8 @@ session_runner_module = _load_module(
 DraftRoundResult = draft_runner_module.DraftRoundResult
 DSSDEdgeSessionState = edge_session_module.DSSDEdgeSessionState
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
+VerifyRoundRequest = protocol_module.VerifyRoundRequest
+VerifyRoundResponse = protocol_module.VerifyRoundResponse
 
 
 def test_draft_round_result_records_minimal_state():
@@ -85,3 +91,22 @@ def test_session_runner_exposes_draft_round_placeholder():
     assert result.draft_token_ids == []
     assert result.q_values == []
     assert result.q_dists_handle == ""
+
+
+def test_session_runner_returns_typed_verify_round_response():
+    runner = DSSDSessionRunner()
+
+    result = runner.dssd_verify_round(
+        VerifyRoundRequest(
+            binding_id="bind-1",
+            verifier_session_id="vs-1",
+            seq_no=2,
+            prefix_delta_token_ids=[4],
+            draft_token_ids=[7, 8],
+            q_values=[0.6, 0.4],
+        )
+    )
+
+    assert isinstance(result, VerifyRoundResponse)
+    assert result.verifier_session_id == "vs-1"
+    assert result.seq_no == 2

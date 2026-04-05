@@ -6,7 +6,9 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from http import HTTPStatus
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -45,6 +47,8 @@ protocol_module = _load_module(
 
 DSSDRoundCoordinator = coordinator_module.DSSDRoundCoordinator
 VerifyRoundResponse = protocol_module.VerifyRoundResponse
+BindVerifierResponse = protocol_module.BindVerifierResponse
+CreateSessionResponse = protocol_module.CreateSessionResponse
 
 
 def test_round_coordinator_commits_bonus_token_on_full_accept():
@@ -91,3 +95,72 @@ def test_round_coordinator_uses_resampled_token_after_reject():
     )
 
     assert committed == [10, 42]
+
+
+def test_round_coordinator_enters_dssd_control_plane_before_failing_closed():
+    class _StubTransport:
+        def __init__(self) -> None:
+            self.bind_calls = []
+            self.session_calls = []
+
+        async def bind_verifier(self, request):
+            self.bind_calls.append(request)
+            return BindVerifierResponse(
+                binding_id="bind-1",
+                protocol_version=request.protocol_version,
+                verifier_model_id="target-model",
+                tokenizer_hash=request.tokenizer_hash,
+                vocab_hash=request.vocab_hash,
+                supported_gamma_max=request.supported_gamma_max,
+                capabilities={"transport": "http"},
+            )
+
+        async def create_session(self, request):
+            self.session_calls.append(request)
+            return CreateSessionResponse(
+                verifier_session_id="vs-1",
+                accepted_prompt_len=len(request.prompt_token_ids),
+                expires_at=None,
+            )
+
+    class _StubServing:
+        def __init__(self) -> None:
+            self.engine_client = SimpleNamespace(
+                vllm_config=SimpleNamespace(
+                    dssd_config=SimpleNamespace(gamma=4),
+                )
+            )
+            self.rendered = False
+
+        async def render_chat_request(self, request):
+            self.rendered = True
+            return [], [{"prompt_token_ids": [1, 2, 3]}]
+
+        def create_error_response(self, message: str, **kwargs):
+            return {"message": message, **kwargs}
+
+    coordinator = DSSDRoundCoordinator(edge_engine=SimpleNamespace(), transport=_StubTransport())
+    request = SimpleNamespace(
+        stream=False,
+        max_tokens=16,
+        stop_token_ids=[2],
+        user="edge-user",
+    )
+    raw_request = SimpleNamespace()
+    serving = _StubServing()
+
+    import asyncio
+
+    result = asyncio.run(
+        coordinator.create_chat_completion(
+            request=request,
+            raw_request=raw_request,
+            serving=serving,
+        )
+    )
+
+    assert serving.rendered is True
+    assert len(coordinator.transport.bind_calls) == 1
+    assert len(coordinator.transport.session_calls) == 1
+    assert result["status_code"] == HTTPStatus.NOT_IMPLEMENTED
+    assert "round loop" in result["message"]

@@ -8,7 +8,7 @@ from typing import Any
 from vllm.v1.dssd.edge.session import DSSDEdgeSessionState
 from vllm.v1.dssd.engine.batch_planner import VerifierRoundBatcher
 from vllm.v1.dssd.engine.session_store import DSSDSessionStore
-from vllm.v1.dssd.protocol import VerifyRoundRequest
+from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 
 
@@ -30,5 +30,16 @@ class DSSDSessionRunner:
             q_dists_handle="",
         )
 
-    def dssd_verify_round(self, request: VerifyRoundRequest) -> dict[str, object]:
-        return {"method": "dssd_verify_round", "request": request}
+    def dssd_verify_round(
+        self, request: VerifyRoundRequest
+    ) -> VerifyRoundResponse:
+        return VerifyRoundResponse(
+            verifier_session_id=request.verifier_session_id,
+            seq_no=request.seq_no,
+            accepted_count=0,
+            all_accepted=False,
+            reject_index=0,
+            reject_target_probs=[1.0],
+            finished=False,
+            finish_reason="placeholder",
+        )

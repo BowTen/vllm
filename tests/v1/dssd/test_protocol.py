@@ -38,6 +38,7 @@ protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 transport = _load_module("vllm.v1.dssd.transport", DSSD_DIR / "transport.py")
 
 BindVerifierResponse = protocol.BindVerifierResponse
+CreateSessionRequest = protocol.CreateSessionRequest
 VerifyRoundRequest = protocol.VerifyRoundRequest
 VerifyRoundResponse = protocol.VerifyRoundResponse
 DSSDTransport = transport.DSSDTransport
@@ -76,6 +77,22 @@ def test_verify_round_request_msgpack_round_trip():
     assert restored == req
 
 
+def test_create_session_request_msgpack_round_trip():
+    req = CreateSessionRequest(
+        binding_id="bind-1",
+        request_id="req-1",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params_digest="sha256",
+        max_new_tokens=16,
+        stop_token_ids=[2],
+    )
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(req),
+        type=CreateSessionRequest,
+    )
+    assert restored == req
+
+
 def test_verify_round_response_reject_shape():
     resp = VerifyRoundResponse(
         verifier_session_id="vs-1",
@@ -107,4 +124,6 @@ def test_transport_is_abstract_and_async():
     with pytest.raises(TypeError):
         DSSDTransport()
     assert inspect.iscoroutinefunction(DSSDTransport.bind_verifier)
+    assert inspect.iscoroutinefunction(DSSDTransport.create_session)
     assert inspect.iscoroutinefunction(DSSDTransport.verify_round)
+    assert inspect.iscoroutinefunction(DSSDTransport.close_session)

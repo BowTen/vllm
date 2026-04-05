@@ -8,6 +8,7 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 ROOT = Path(__file__).resolve().parents[4]
 VLLM_DIR = ROOT / "vllm"
@@ -46,6 +47,12 @@ class _DummyServingBase:
     def warmup(self) -> None:
         return None
 
+    async def create_chat_completion(self, *args, **kwargs):
+        return ("base", args, kwargs)
+
+    def create_error_response(self, message: str, **kwargs):
+        return {"message": message, **kwargs}
+
 
 class _DummyModelConfig:
     model = "dummy-model"
@@ -60,8 +67,22 @@ class _DummyModelConfig:
 
 
 class _DummyVllmConfig:
-    def __init__(self, role: str = "edge") -> None:
-        self.dssd_config = SimpleNamespace(enabled=True, role=role)
+    def __init__(
+        self,
+        role: str = "edge",
+        verifier_url: str | None = "http://127.0.0.1:9001",
+    ) -> None:
+        self.dssd_config = SimpleNamespace(
+            enabled=True,
+            role=role,
+            gamma=4,
+            verifier_url=verifier_url,
+            network_simulation=SimpleNamespace(
+                latency_ms=0.0,
+                bandwidth_mbps=None,
+                jitter_ms=0.0,
+            ),
+        )
 
 
 _install_package_stub("vllm", VLLM_DIR)
@@ -143,6 +164,37 @@ def test_dssd_serving_chat_initializes_round_coordinator():
 
     assert isinstance(serving.round_coordinator, DSSDRoundCoordinator)
     assert serving.round_coordinator.edge_engine is engine_client
+
+
+def test_dssd_serving_chat_delegates_generation_to_round_coordinator():
+    engine_client = SimpleNamespace(vllm_config=_DummyVllmConfig())
+    models = SimpleNamespace(model_name=lambda *_args, **_kwargs: "dummy-model")
+    serving = DSSDEdgeServingChat(
+        engine_client,
+        models,
+        "assistant",
+        openai_serving_render=SimpleNamespace(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+    )
+    request = SimpleNamespace(stream=False)
+    raw_request = SimpleNamespace()
+    sentinel = {"path": "dssd"}
+    serving.round_coordinator = SimpleNamespace(
+        create_chat_completion=AsyncMock(return_value=sentinel),
+    )
+
+    import asyncio
+
+    result = asyncio.run(serving.create_chat_completion(request, raw_request))
+
+    assert result == sentinel
+    serving.round_coordinator.create_chat_completion.assert_awaited_once_with(
+        request=request,
+        raw_request=raw_request,
+        serving=serving,
+    )
 
 
 def test_init_generate_state_uses_dssd_serving_chat_for_edge_role():

@@ -25,6 +25,21 @@ class BindVerifierResponse(msgspec.Struct, omit_defaults=True):
     capabilities: dict[str, str] | None = None
 
 
+class CreateSessionRequest(msgspec.Struct, omit_defaults=True):
+    binding_id: str
+    request_id: str
+    prompt_token_ids: list[int]
+    sampling_params_digest: str
+    max_new_tokens: int | None = None
+    stop_token_ids: list[int] | None = None
+
+
+class CreateSessionResponse(msgspec.Struct, omit_defaults=True):
+    verifier_session_id: str
+    accepted_prompt_len: int
+    expires_at: float | None = None
+
+
 class VerifyRoundRequest(msgspec.Struct, omit_defaults=True):
     binding_id: str
     verifier_session_id: str
@@ -44,3 +59,12 @@ class VerifyRoundResponse(msgspec.Struct, omit_defaults=True):
     reject_target_probs: list[float] | None = None
     finished: bool = False
     finish_reason: str | None = None
+
+
+class CloseSessionRequest(msgspec.Struct, omit_defaults=True):
+    verifier_session_id: str
+    reason: str | None = None
+
+
+class CloseSessionResponse(msgspec.Struct, omit_defaults=True):
+    closed: bool

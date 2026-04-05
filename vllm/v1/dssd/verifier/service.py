@@ -3,6 +3,20 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
+import msgspec
+
+from vllm.v1.dssd.protocol import (
+    BindVerifierRequest,
+    BindVerifierResponse,
+    CloseSessionRequest,
+    CloseSessionResponse,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    VerifyRoundRequest,
+    VerifyRoundResponse,
+)
 from vllm.v1.dssd.verifier.session import DSSDVerifierSessionManager
 
 
@@ -11,6 +25,98 @@ class DSSDVerifierService:
         self.engine_client = engine_client
         self.vllm_config = vllm_config
         self.session_manager = DSSDVerifierSessionManager()
+        self._bindings: set[str] = set()
 
-    async def bind_verifier(self, *_args, **_kwargs) -> dict[str, bool]:
-        return {"ok": True}
+    async def bind_verifier(
+        self, request: BindVerifierRequest
+    ) -> BindVerifierResponse:
+        dssd_config = getattr(self.vllm_config, "dssd_config", None)
+        if dssd_config is None or not dssd_config.enabled or dssd_config.role != "verifier":
+            raise ValueError("DSSD verifier service is disabled")
+
+        binding_id = f"bind-{uuid4().hex}"
+        self._bindings.add(binding_id)
+        supported_gamma_max = min(request.supported_gamma_max, dssd_config.gamma)
+        verifier_model_id = getattr(
+            getattr(self.engine_client, "model_config", None),
+            "model",
+            "unknown-model",
+        )
+        return BindVerifierResponse(
+            binding_id=binding_id,
+            protocol_version=request.protocol_version,
+            verifier_model_id=verifier_model_id,
+            tokenizer_hash=request.tokenizer_hash,
+            vocab_hash=request.vocab_hash,
+            supported_gamma_max=supported_gamma_max,
+            capabilities={
+                "session_lifecycle": "bind/create/verify/close",
+                "tokenizer_validation": "caller-supplied",
+            },
+        )
+
+    async def create_session(
+        self, request: CreateSessionRequest
+    ) -> CreateSessionResponse:
+        self._ensure_binding(request.binding_id)
+        verifier_session_id = f"vs-{uuid4().hex}"
+        self.session_manager.create_session(
+            verifier_session_id,
+            binding_id=request.binding_id,
+            sampling_params_fingerprint=request.sampling_params_digest,
+            prompt_token_ids=request.prompt_token_ids,
+        )
+        return CreateSessionResponse(
+            verifier_session_id=verifier_session_id,
+            accepted_prompt_len=len(request.prompt_token_ids),
+            expires_at=None,
+        )
+
+    async def verify_round(
+        self, request: VerifyRoundRequest
+    ) -> VerifyRoundResponse:
+        self._ensure_binding(request.binding_id)
+        session = self.session_manager.get_session(request.verifier_session_id)
+        if session.binding_id != request.binding_id:
+            raise ValueError("binding_id does not match verifier session")
+
+        cached = self.session_manager.get_cached_response(
+            request.verifier_session_id,
+            seq_no=request.seq_no,
+        )
+        if cached is not None:
+            return cached
+
+        self.session_manager.ensure_next_seq_no(
+            request.verifier_session_id,
+            request.seq_no,
+        )
+        self.session_manager.append_prefix_delta(
+            request.verifier_session_id,
+            request.prefix_delta_token_ids,
+        )
+
+        response = await self.engine_client.dssd_verify_round_async(request)
+        if not isinstance(response, VerifyRoundResponse):
+            response = msgspec.convert(response, type=VerifyRoundResponse)
+        self.session_manager.cache_response(
+            request.verifier_session_id,
+            seq_no=request.seq_no,
+            response=response,
+        )
+        self.session_manager.update_seq_no(
+            request.verifier_session_id,
+            request.seq_no,
+        )
+        return response
+
+    async def close_session(
+        self, request: CloseSessionRequest
+    ) -> CloseSessionResponse:
+        return CloseSessionResponse(
+            closed=self.session_manager.delete_session(request.verifier_session_id)
+        )
+
+    def _ensure_binding(self, binding_id: str) -> None:
+        if binding_id not in self._bindings:
+            raise ValueError("unknown verifier binding")

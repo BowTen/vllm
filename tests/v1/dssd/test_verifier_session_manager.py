@@ -46,15 +46,36 @@ DSSDVerifierSessionManager = session_module.DSSDVerifierSessionManager
 
 def test_verifier_session_manager_replays_cached_response():
     manager = DSSDVerifierSessionManager()
-    manager.create_session("vs-1", sampling_params_fingerprint="abc")
+    manager.create_session(
+        "vs-1",
+        binding_id="bind-1",
+        sampling_params_fingerprint="abc",
+    )
     manager.cache_response("vs-1", seq_no=3, response={"accepted_count": 2})
     assert manager.get_cached_response("vs-1", seq_no=3) == {"accepted_count": 2}
 
 
 def test_verifier_session_manager_rejects_out_of_order_seq():
     manager = DSSDVerifierSessionManager()
-    manager.create_session("vs-1", sampling_params_fingerprint="abc")
+    manager.create_session(
+        "vs-1",
+        binding_id="bind-1",
+        sampling_params_fingerprint="abc",
+    )
     manager.update_seq_no("vs-1", 4)
 
     with pytest.raises(ValueError, match="out-of-order"):
         manager.ensure_next_seq_no("vs-1", 6)
+
+
+def test_verifier_session_manager_rejects_stale_uncached_seq():
+    manager = DSSDVerifierSessionManager()
+    manager.create_session(
+        "vs-1",
+        binding_id="bind-1",
+        sampling_params_fingerprint="abc",
+    )
+    manager.update_seq_no("vs-1", 4)
+
+    with pytest.raises(ValueError, match="stale"):
+        manager.ensure_next_seq_no("vs-1", 3)
