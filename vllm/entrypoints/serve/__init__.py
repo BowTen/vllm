@@ -9,6 +9,21 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _is_dssd_verifier_enabled(args: object) -> bool:
+    dssd_config = getattr(args, "dssd_config", None)
+    if dssd_config is None:
+        return False
+
+    if isinstance(dssd_config, dict):
+        enabled = dssd_config.get("enabled", False)
+        role = dssd_config.get("role")
+    else:
+        enabled = getattr(dssd_config, "enabled", False)
+        role = getattr(dssd_config, "role", None)
+
+    return bool(enabled and role == "verifier")
+
+
 def register_vllm_serve_api_routers(app: FastAPI):
     if envs.VLLM_SERVER_DEV_MODE:
         logger.warning(
@@ -52,11 +67,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
-    from vllm.entrypoints.serve.dssd.api_router import (
-        attach_router as attach_dssd_router,
-    )
+    if _is_dssd_verifier_enabled(app.state.args):
+        from vllm.entrypoints.serve.dssd.api_router import (
+            attach_router as attach_dssd_router,
+        )
 
-    attach_dssd_router(app)
+        attach_dssd_router(app)
 
     from .instrumentator import register_instrumentator_api_routers
 

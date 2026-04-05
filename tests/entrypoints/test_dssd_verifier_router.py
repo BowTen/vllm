@@ -46,8 +46,12 @@ attach_router = router_module.attach_router
 
 
 def test_verifier_router_exposes_bind_endpoint():
+    class _StubVerifierService:
+        async def bind_verifier(self):
+            return {"ok": True}
+
     app = FastAPI()
-    app.state.dssd_verifier_service = object()
+    app.state.dssd_verifier_service = _StubVerifierService()
     attach_router(app)
 
     client = TestClient(app)
@@ -56,3 +60,13 @@ def test_verifier_router_exposes_bind_endpoint():
     assert "/server/dssd/bind" in paths
     response = client.post("/server/dssd/bind")
     assert response.status_code == 200
+
+
+def test_verifier_router_fails_closed_without_service():
+    app = FastAPI()
+    attach_router(app)
+
+    client = TestClient(app)
+    response = client.post("/server/dssd/bind")
+
+    assert response.status_code == 503

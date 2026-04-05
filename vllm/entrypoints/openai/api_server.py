@@ -374,7 +374,8 @@ async def init_app_state(
 
     state.dssd_verifier_service = None
     dssd_config = getattr(vllm_config, "dssd_config", None)
-    if dssd_config is not None and dssd_config.enabled:
+    if (dssd_config is not None and dssd_config.enabled
+            and dssd_config.role == "verifier"):
         from vllm.v1.dssd.verifier.service import DSSDVerifierService
 
         state.dssd_verifier_service = DSSDVerifierService(engine_client, vllm_config)

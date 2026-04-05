@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, FastAPI, Request
+from http import HTTPStatus
+
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 
 router = APIRouter(prefix="/server/dssd", tags=["dssd"])
 
@@ -13,7 +15,10 @@ async def bind_verifier(raw_request: Request):
     service = getattr(raw_request.app.state, "dssd_verifier_service", None)
     if service is not None and hasattr(service, "bind_verifier"):
         return await service.bind_verifier()
-    return {"ok": True}
+    raise HTTPException(
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        detail="DSSD verifier service is not available",
+    )
 
 
 def attach_router(app: FastAPI) -> None:
