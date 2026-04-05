@@ -42,6 +42,15 @@ def register_generate_api_routers(app: FastAPI):
     register_anthropic_api_router(app)
 
 
+def _is_dssd_edge_mode(vllm_config: object) -> bool:
+    dssd_config = getattr(vllm_config, "dssd_config", None)
+    return bool(
+        dssd_config is not None
+        and getattr(dssd_config, "enabled", False)
+        and getattr(dssd_config, "role", None) == "edge"
+    )
+
+
 async def init_generate_state(
     engine_client: "EngineClient",
     state: "State",
@@ -56,10 +65,10 @@ async def init_generate_state(
         MCPToolServer,
         ToolServer,
     )
-    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.disagg.serving import ServingTokens
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -114,8 +123,17 @@ async def init_generate_state(
         if "generate" in supported_tasks
         else None
     )
+    vllm_config = engine_client.vllm_config
+    openai_serving_chat_cls = OpenAIServingChat
+    if _is_dssd_edge_mode(vllm_config):
+        from vllm.entrypoints.openai.chat_completion.dssd_serving import (
+            DSSDEdgeServingChat,
+        )
+
+        openai_serving_chat_cls = DSSDEdgeServingChat
+
     state.openai_serving_chat = (
-        OpenAIServingChat(
+        openai_serving_chat_cls(
             engine_client,
             state.openai_serving_models,
             args.response_role,
