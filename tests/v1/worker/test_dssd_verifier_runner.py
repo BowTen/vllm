@@ -9,6 +9,8 @@ import types
 from pathlib import Path
 from unittest.mock import Mock
 
+import torch
+
 
 ROOT = Path(__file__).resolve().parents[3]
 VLLM_DIR = ROOT / "vllm"
@@ -55,6 +57,8 @@ protocol_module = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py"
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 build_verifier_result = verifier_runner_module.build_verifier_result
+build_verifier_result_from_logits = verifier_runner_module.build_verifier_result_from_logits
+extract_forward_probs = verifier_runner_module.extract_forward_probs
 
 
 def test_build_verifier_result_preserves_forward_prob_slices():
@@ -80,6 +84,66 @@ def test_build_verifier_result_preserves_forward_prob_slices():
     assert result.bonus_probs == [0.7, 0.3]
     assert result.finished is True
     assert result.finish_reason == "stop"
+
+
+def test_extract_forward_probs_uses_target_and_bonus_indices():
+    metadata = types.SimpleNamespace(
+        target_logits_indices=torch.tensor([1, 3], dtype=torch.int32),
+        bonus_logits_indices=torch.tensor([0], dtype=torch.int32),
+    )
+    logits = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [5.0, 5.0],
+            [2.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    seq_probs, bonus_probs = extract_forward_probs(logits, metadata)
+
+    assert len(seq_probs) == 2
+    assert bonus_probs == [0.5, 0.5]
+    assert seq_probs[0][1] > seq_probs[0][0]
+    assert seq_probs[1][0] > seq_probs[1][1]
+
+
+def test_build_verifier_result_from_logits_composes_helper_steps():
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-2",
+        seq_no=4,
+        prefix_delta_token_ids=[],
+        draft_token_ids=[0, 1],
+        q_values=[0.2, 0.4],
+    )
+    metadata = types.SimpleNamespace(
+        target_logits_indices=torch.tensor([1, 3], dtype=torch.int32),
+        bonus_logits_indices=torch.tensor([0], dtype=torch.int32),
+    )
+    logits = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [5.0, 5.0],
+            [2.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    result = build_verifier_result_from_logits(
+        request=request,
+        logits=logits,
+        metadata=metadata,
+        finish_reason="spec-forward",
+    )
+
+    assert result.verifier_session_id == "vs-2"
+    assert result.seq_no == 4
+    assert len(result.seq_probs) == 2
+    assert result.bonus_probs == [0.7310585975646973, 0.2689414322376251]
+    assert result.finish_reason == "spec-forward"
 
 
 def test_session_runner_uses_collective_rpc_for_verify_round():
