@@ -36,6 +36,7 @@ _install_package_stub("vllm.v1.dssd", DSSD_DIR)
 
 protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 transport = _load_module("vllm.v1.dssd.transport", DSSD_DIR / "transport.py")
+dssd_package = _load_module("vllm.v1.dssd", DSSD_DIR / "__init__.py")
 
 BindVerifierResponse = protocol.BindVerifierResponse
 DraftRoundRequest = protocol.DraftRoundRequest
@@ -108,6 +109,11 @@ def test_dssd_verifier_execution_request_rejects_prefix_delta():
             q_values=[0.2, 0.3, 0.4],
             prefix_delta_token_ids=[42],
         )
+
+
+def test_package_keeps_internal_execution_request_without_public_export():
+    assert dssd_package.DSSDVerifierExecutionRequest is DSSDVerifierExecutionRequest
+    assert "DSSDVerifierExecutionRequest" not in dssd_package.__all__
 
 
 def test_create_session_request_msgpack_round_trip():

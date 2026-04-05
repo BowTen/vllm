@@ -8,6 +8,7 @@ from .protocol import (
     CloseSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DSSDVerifierExecutionRequest,
     DraftRoundRequest,
     VerifyRoundRequest,
     VerifyRoundResponse,
