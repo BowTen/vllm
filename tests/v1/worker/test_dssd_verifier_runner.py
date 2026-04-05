@@ -70,6 +70,9 @@ build_verifier_replay_scheduler_output = (
     verifier_runner_module.build_verifier_replay_scheduler_output
 )
 extract_forward_probs = verifier_runner_module.extract_forward_probs
+run_verifier_replay_forward = (
+    verifier_runner_module.run_verifier_replay_forward
+)
 
 
 def test_protocol_module_is_shared_with_session_runner_imports():
@@ -206,6 +209,80 @@ def test_session_runner_uses_collective_rpc_for_verify_round():
         "dssd_verify_round",
         args=(called_request,),
     )
+
+
+def test_session_runner_verify_round_selects_non_none_collective_reply():
+    expected = VerifierForwardResult(
+        verifier_session_id="vs-pp",
+        seq_no=3,
+        seq_probs=[[0.4, 0.6]],
+        bonus_probs=[0.7, 0.3],
+        finish_reason="gpu-replay-forward",
+    )
+    model_executor = types.SimpleNamespace(
+        collective_rpc=Mock(return_value=[None, expected, None]),
+    )
+    runner = DSSDSessionRunner(model_executor=model_executor)
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-pp",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2],
+            sampling_params_digest="sp-1",
+        )
+    )
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-pp",
+        seq_no=3,
+        prefix_delta_token_ids=[4],
+        draft_token_ids=[9],
+        q_values=[0.75],
+    )
+
+    result = runner.dssd_verify_round(request)
+
+    assert result == expected
+
+
+def test_session_runner_verify_round_rejects_multiple_collective_replies():
+    reply_a = VerifierForwardResult(
+        verifier_session_id="vs-pp",
+        seq_no=4,
+        seq_probs=[[0.4, 0.6]],
+        bonus_probs=[0.7, 0.3],
+        finish_reason="gpu-replay-forward",
+    )
+    reply_b = VerifierForwardResult(
+        verifier_session_id="vs-pp",
+        seq_no=4,
+        seq_probs=[[0.6, 0.4]],
+        bonus_probs=[0.2, 0.8],
+        finish_reason="gpu-replay-forward",
+    )
+    model_executor = types.SimpleNamespace(
+        collective_rpc=Mock(return_value=[reply_a, None, reply_b]),
+    )
+    runner = DSSDSessionRunner(model_executor=model_executor)
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-pp",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2],
+            sampling_params_digest="sp-1",
+        )
+    )
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-pp",
+        seq_no=4,
+        prefix_delta_token_ids=[],
+        draft_token_ids=[9],
+        q_values=[0.75],
+    )
+
+    with pytest.raises(RuntimeError, match="exactly one verifier reply"):
+        runner.dssd_verify_round(request)
 
 
 def test_session_runner_keeps_committed_prefix_stable_across_retry():
@@ -390,3 +467,328 @@ def test_build_verifier_replay_scheduler_output_keeps_view_snapshot_stable():
     assert view.prompt_token_ids == [11, 12]
     assert view.spec_token_ids == [21, 22]
     assert view.block_ids == ([0], [0])
+
+
+def test_run_verifier_replay_forward_executes_model_and_cleans_up_batch_state():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-4",
+        seq_no=6,
+        committed_token_ids=[1, 2, 3],
+        draft_token_ids=[4, 5],
+        q_values=[0.2, 0.8],
+    )
+    metadata = types.SimpleNamespace(
+        target_logits_indices=torch.tensor([0, 1], dtype=torch.int32),
+        bonus_logits_indices=torch.tensor([2], dtype=torch.int32),
+    )
+    fake_runner = types.SimpleNamespace(
+        use_async_scheduling=False,
+        is_pooling_model=False,
+        supports_mm_inputs=False,
+        kv_cache_config=types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(
+                    kv_cache_spec=types.SimpleNamespace(block_size=16)
+                )
+            ]
+        ),
+        execute_model=Mock(return_value=None),
+        execute_model_state=types.SimpleNamespace(
+            logits=torch.tensor(
+                [
+                    [4.0, 0.0],
+                    [0.0, 4.0],
+                    [2.0, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+            spec_decode_metadata=metadata,
+        ),
+        input_batch=types.SimpleNamespace(
+            prev_sampled_token_ids="stale",
+            remove_request=Mock(return_value=0),
+            condense=Mock(),
+        ),
+        requests={"dssd-verify:vs-4:6": object()},
+        num_prompt_logprobs={"dssd-verify:vs-4:6": 1},
+        late_interaction_runner=types.SimpleNamespace(
+            on_requests_finished=Mock(),
+        ),
+        _draft_token_ids=[99],
+        _draft_token_req_ids=["old-req"],
+    )
+
+    result = run_verifier_replay_forward(fake_runner, request)
+
+    fake_runner.execute_model.assert_called_once()
+    fake_runner.input_batch.remove_request.assert_called_once_with(
+        "dssd-verify:vs-4:6"
+    )
+    fake_runner.input_batch.condense.assert_called_once_with()
+    fake_runner.late_interaction_runner.on_requests_finished.assert_called_once_with(
+        {"dssd-verify:vs-4:6"}
+    )
+    assert "dssd-verify:vs-4:6" not in fake_runner.requests
+    assert "dssd-verify:vs-4:6" not in fake_runner.num_prompt_logprobs
+    assert fake_runner.execute_model_state is None
+    assert fake_runner.input_batch.prev_sampled_token_ids is None
+    assert fake_runner._draft_token_ids is None
+    assert fake_runner._draft_token_req_ids is None
+    assert result.verifier_session_id == "vs-4"
+    assert result.seq_no == 6
+    assert len(result.seq_probs) == 2
+
+
+def test_run_verifier_replay_forward_rejects_async_scheduling():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-5",
+        seq_no=0,
+        committed_token_ids=[7],
+        draft_token_ids=[8],
+        q_values=[0.5],
+    )
+    fake_runner = types.SimpleNamespace(use_async_scheduling=True)
+
+    with pytest.raises(NotImplementedError, match="async scheduling"):
+        run_verifier_replay_forward(fake_runner, request)
+
+
+def test_run_verifier_replay_forward_cleans_up_when_execute_model_returns_value():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-6",
+        seq_no=2,
+        committed_token_ids=[1, 2],
+        draft_token_ids=[3],
+        q_values=[0.9],
+    )
+    fake_runner = types.SimpleNamespace(
+        use_async_scheduling=False,
+        is_pooling_model=False,
+        supports_mm_inputs=False,
+        kv_cache_config=types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(
+                    kv_cache_spec=types.SimpleNamespace(block_size=16)
+                )
+            ]
+        ),
+        execute_model=Mock(return_value=object()),
+        execute_model_state="stale-state",
+        input_batch=types.SimpleNamespace(
+            prev_sampled_token_ids="stale",
+            remove_request=Mock(return_value=0),
+            condense=Mock(),
+        ),
+        requests={"dssd-verify:vs-6:2": object()},
+        num_prompt_logprobs={"dssd-verify:vs-6:2": 1},
+        late_interaction_runner=types.SimpleNamespace(
+            on_requests_finished=Mock(),
+        ),
+        _draft_token_ids=[99],
+        _draft_token_req_ids=["old-req"],
+    )
+
+    with pytest.raises(RuntimeError, match="cache logits state"):
+        run_verifier_replay_forward(fake_runner, request)
+
+    fake_runner.input_batch.remove_request.assert_called_once_with(
+        "dssd-verify:vs-6:2"
+    )
+    fake_runner.input_batch.condense.assert_called_once_with()
+    fake_runner.late_interaction_runner.on_requests_finished.assert_called_once_with(
+        {"dssd-verify:vs-6:2"}
+    )
+    assert "dssd-verify:vs-6:2" not in fake_runner.requests
+    assert "dssd-verify:vs-6:2" not in fake_runner.num_prompt_logprobs
+    assert fake_runner.execute_model_state is None
+    assert fake_runner.input_batch.prev_sampled_token_ids is None
+    assert fake_runner._draft_token_ids is None
+    assert fake_runner._draft_token_req_ids is None
+
+
+def test_run_verifier_replay_forward_requires_cached_logits():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-7",
+        seq_no=1,
+        committed_token_ids=[1, 2],
+        draft_token_ids=[3],
+        q_values=[0.6],
+    )
+    fake_runner = types.SimpleNamespace(
+        use_async_scheduling=False,
+        is_pooling_model=False,
+        supports_mm_inputs=False,
+        kv_cache_config=types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(
+                    kv_cache_spec=types.SimpleNamespace(block_size=16)
+                )
+            ]
+        ),
+        execute_model=Mock(return_value=None),
+        execute_model_state=types.SimpleNamespace(
+            logits=None,
+            spec_decode_metadata=types.SimpleNamespace(
+                target_logits_indices=torch.tensor([0], dtype=torch.int32),
+                bonus_logits_indices=torch.tensor([1], dtype=torch.int32),
+            ),
+        ),
+        input_batch=types.SimpleNamespace(
+            prev_sampled_token_ids="stale",
+            remove_request=Mock(return_value=0),
+            condense=Mock(),
+        ),
+        requests={"dssd-verify:vs-7:1": object()},
+        num_prompt_logprobs={"dssd-verify:vs-7:1": 1},
+        late_interaction_runner=types.SimpleNamespace(
+            on_requests_finished=Mock(),
+        ),
+        _draft_token_ids=[99],
+        _draft_token_req_ids=["old-req"],
+    )
+
+    with pytest.raises(RuntimeError, match="cached logits"):
+        run_verifier_replay_forward(fake_runner, request)
+
+
+def test_run_verifier_replay_forward_non_output_pp_rank_returns_none_and_cleans_up(
+    monkeypatch,
+):
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-8",
+        seq_no=2,
+        committed_token_ids=[1, 2],
+        draft_token_ids=[3],
+        q_values=[0.5],
+    )
+    fake_runner = types.SimpleNamespace(
+        use_async_scheduling=False,
+        is_pooling_model=False,
+        supports_mm_inputs=False,
+        kv_cache_config=types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(
+                    kv_cache_spec=types.SimpleNamespace(block_size=16)
+                )
+            ]
+        ),
+        execute_model=Mock(return_value=object()),
+        execute_model_state="stale-state",
+        input_batch=types.SimpleNamespace(
+            prev_sampled_token_ids="stale",
+            remove_request=Mock(return_value=0),
+            condense=Mock(),
+        ),
+        requests={"dssd-verify:vs-8:2": object()},
+        num_prompt_logprobs={"dssd-verify:vs-8:2": 1},
+        late_interaction_runner=types.SimpleNamespace(
+            on_requests_finished=Mock(),
+        ),
+        _draft_token_ids=[99],
+        _draft_token_req_ids=["old-req"],
+    )
+    monkeypatch.setattr(
+        verifier_runner_module,
+        "get_pp_group",
+        lambda: types.SimpleNamespace(is_last_rank=False),
+        raising=False,
+    )
+
+    result = run_verifier_replay_forward(fake_runner, request)
+
+    assert result is None
+    fake_runner.input_batch.remove_request.assert_called_once_with(
+        "dssd-verify:vs-8:2"
+    )
+    fake_runner.input_batch.condense.assert_called_once_with()
+    fake_runner.late_interaction_runner.on_requests_finished.assert_called_once_with(
+        {"dssd-verify:vs-8:2"}
+    )
+    assert "dssd-verify:vs-8:2" not in fake_runner.requests
+    assert "dssd-verify:vs-8:2" not in fake_runner.num_prompt_logprobs
+    assert fake_runner.execute_model_state is None
+    assert fake_runner.input_batch.prev_sampled_token_ids is None
+    assert fake_runner._draft_token_ids is None
+    assert fake_runner._draft_token_req_ids is None
+
+
+def test_run_verifier_replay_forward_non_output_pp_rank_ignores_broadcast_logits_and_cleans_up(  # noqa: E501
+    monkeypatch,
+):
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-9",
+        seq_no=3,
+        committed_token_ids=[1, 2, 3],
+        draft_token_ids=[4, 5],
+        q_values=[0.2, 0.8],
+    )
+    metadata = types.SimpleNamespace(
+        target_logits_indices=torch.tensor([0, 1], dtype=torch.int32),
+        bonus_logits_indices=torch.tensor([2], dtype=torch.int32),
+    )
+    fake_runner = types.SimpleNamespace(
+        use_async_scheduling=False,
+        is_pooling_model=False,
+        supports_mm_inputs=False,
+        kv_cache_config=types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(
+                    kv_cache_spec=types.SimpleNamespace(block_size=16)
+                )
+            ]
+        ),
+        execute_model=Mock(return_value=None),
+        execute_model_state=types.SimpleNamespace(
+            logits=torch.tensor(
+                [
+                    [4.0, 0.0],
+                    [0.0, 4.0],
+                    [2.0, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+            spec_decode_metadata=metadata,
+        ),
+        input_batch=types.SimpleNamespace(
+            prev_sampled_token_ids="stale",
+            remove_request=Mock(return_value=0),
+            condense=Mock(),
+        ),
+        requests={"dssd-verify:vs-9:3": object()},
+        num_prompt_logprobs={"dssd-verify:vs-9:3": 1},
+        late_interaction_runner=types.SimpleNamespace(
+            on_requests_finished=Mock(),
+        ),
+        _draft_token_ids=[99],
+        _draft_token_req_ids=["old-req"],
+    )
+    monkeypatch.setattr(
+        verifier_runner_module,
+        "get_pp_group",
+        lambda: types.SimpleNamespace(is_last_rank=False),
+        raising=False,
+    )
+
+    result = run_verifier_replay_forward(fake_runner, request)
+
+    assert result is None
+    fake_runner.execute_model.assert_called_once()
+    fake_runner.input_batch.remove_request.assert_called_once_with(
+        "dssd-verify:vs-9:3"
+    )
+    fake_runner.input_batch.condense.assert_called_once_with()
+    fake_runner.late_interaction_runner.on_requests_finished.assert_called_once_with(
+        {"dssd-verify:vs-9:3"}
+    )
+    assert "dssd-verify:vs-9:3" not in fake_runner.requests
+    assert "dssd-verify:vs-9:3" not in fake_runner.num_prompt_logprobs
+    assert fake_runner.execute_model_state is None
+    assert fake_runner.input_batch.prev_sampled_token_ids is None
+    assert fake_runner._draft_token_ids is None
+    assert fake_runner._draft_token_req_ids is None

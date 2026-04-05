@@ -8,6 +8,7 @@ from math import ceil
 
 import torch
 
+from vllm.distributed import get_pp_group
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -143,3 +144,82 @@ def build_verifier_replay_scheduler_output(
         free_encoder_mm_hashes=[],
     )
     return view, scheduler_output
+
+
+def _get_verifier_replay_block_sizes(model_runner) -> tuple[int, ...]:
+    return tuple(
+        group.kv_cache_spec.block_size
+        for group in model_runner.kv_cache_config.kv_cache_groups
+    )
+
+
+def _cleanup_verifier_replay_request(model_runner, request_id: str) -> None:
+    model_runner.requests.pop(request_id, None)
+    model_runner.num_prompt_logprobs.pop(request_id, None)
+    model_runner.late_interaction_runner.on_requests_finished({request_id})
+    removed = model_runner.input_batch.remove_request(request_id)
+    if removed is not None:
+        model_runner.input_batch.condense()
+
+
+def _is_output_pp_rank() -> bool:
+    try:
+        return get_pp_group().is_last_rank
+    except AssertionError:
+        return True
+
+
+def run_verifier_replay_forward(
+    model_runner,
+    request: DSSDVerifierExecutionRequest,
+) -> VerifierForwardResult | None:
+    if not isinstance(request, DSSDVerifierExecutionRequest):
+        raise TypeError("dssd_verify_round expects DSSDVerifierExecutionRequest")
+    if model_runner.use_async_scheduling:
+        raise NotImplementedError(
+            "DSSD verifier replay does not support async scheduling yet"
+        )
+    if model_runner.is_pooling_model:
+        raise NotImplementedError(
+            "DSSD verifier replay does not support pooling models"
+        )
+    if model_runner.supports_mm_inputs:
+        raise NotImplementedError(
+            "DSSD verifier replay does not support multimodal models"
+        )
+
+    view, scheduler_output = build_verifier_replay_scheduler_output(
+        request,
+        block_sizes=_get_verifier_replay_block_sizes(model_runner),
+    )
+    try:
+        result = model_runner.execute_model(scheduler_output)
+        if not _is_output_pp_rank():
+            return None
+        if result is not None:
+            raise RuntimeError(
+                "DSSD verifier replay expected execute_model to cache logits state"
+            )
+
+        state = model_runner.execute_model_state
+        if (
+            state is None
+            or state.logits is None
+            or state.spec_decode_metadata is None
+        ):
+            raise RuntimeError(
+                "DSSD verifier replay expected cached logits and "
+                "spec decode metadata"
+            )
+        return build_verifier_result_from_logits(
+            request=request,
+            logits=state.logits,
+            metadata=state.spec_decode_metadata,
+            finish_reason="gpu-replay-forward",
+        )
+    finally:
+        model_runner.execute_model_state = None
+        model_runner._draft_token_ids = None
+        model_runner._draft_token_req_ids = None
+        model_runner.input_batch.prev_sampled_token_ids = None
+        _cleanup_verifier_replay_request(model_runner, view.request_id)

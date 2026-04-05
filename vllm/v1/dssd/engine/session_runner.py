@@ -101,7 +101,13 @@ class DSSDSessionRunner:
                 "dssd_verify_round",
                 args=(execution_request,),
             )
-            response = result[0]
+            replies = [reply for reply in result if reply is not None]
+            if len(replies) != 1:
+                raise RuntimeError(
+                    "dssd_verify_round expected exactly one verifier "
+                    "reply from the output rank"
+                )
+            response = replies[0]
         else:
             vocab_size = max(execution_request.draft_token_ids, default=0) + 1
             vocab_size = max(vocab_size, 1)
