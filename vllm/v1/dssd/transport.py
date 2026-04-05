@@ -13,6 +13,12 @@ from .protocol import (
 )
 
 
+class SimulatedNetworkMixin:
+    async def _apply_network_simulation(self, payload_size_bytes: int) -> None:
+        del payload_size_bytes
+        return None
+
+
 class DSSDTransport(ABC):
     @abstractmethod
     async def bind_verifier(
