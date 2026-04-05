@@ -36,6 +36,8 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.v1.dssd.engine.session_runner import DSSDSessionRunner
+from vllm.v1.dssd.protocol import VerifyRoundRequest
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -211,6 +213,7 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+        self.dssd_session_runner = DSSDSessionRunner()
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -287,6 +290,11 @@ class EngineCore:
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
+
+    def dssd_verify_round(
+        self, request: VerifyRoundRequest
+    ) -> dict[str, object]:
+        return self.dssd_session_runner.dssd_verify_round(request)
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.

@@ -31,6 +31,7 @@ from vllm.utils.network_utils import (
     get_open_zmq_inproc_path,
     make_zmq_socket,
 )
+from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
@@ -257,6 +258,11 @@ class EngineCoreClient(ABC):
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
+        raise NotImplementedError
+
+    async def dssd_verify_round_async(
+        self, request: VerifyRoundRequest
+    ) -> VerifyRoundResponse:
         raise NotImplementedError
 
     async def collective_rpc_async(
@@ -1145,6 +1151,11 @@ class AsyncMPClient(MPClient):
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         await self.call_utility_async("save_sharded_state", path, pattern, max_size)
+
+    async def dssd_verify_round_async(
+        self, request: VerifyRoundRequest
+    ) -> VerifyRoundResponse:
+        return await self.call_utility_async("dssd_verify_round", request)
 
     async def collective_rpc_async(
         self,
