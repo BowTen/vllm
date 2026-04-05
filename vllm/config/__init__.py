@@ -10,6 +10,7 @@ from vllm.config.compilation import (
     PassConfig,
 )
 from vllm.config.device import DeviceConfig
+from vllm.config.dssd import DSSDConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -70,6 +71,8 @@ __all__ = [
     "PassConfig",
     # From vllm.config.device
     "DeviceConfig",
+    # From vllm.config.dssd
+    "DSSDConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
     # From vllm.config.kernel

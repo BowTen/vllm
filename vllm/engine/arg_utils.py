@@ -38,6 +38,7 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    DSSDConfig,
     ECTransferConfig,
     EPLBConfig,
     KernelConfig,
@@ -563,6 +564,7 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+    dssd_config: DSSDConfig | None = get_field(VllmConfig, "dssd_config")
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -632,6 +634,8 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        if isinstance(self.dssd_config, dict):
+            self.dssd_config = DSSDConfig(**self.dssd_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -1282,6 +1286,7 @@ class EngineArgs:
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
+        vllm_group.add_argument("--dssd-config", **vllm_kwargs["dssd_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1929,6 +1934,7 @@ class EngineArgs:
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
+            dssd_config=self.dssd_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,

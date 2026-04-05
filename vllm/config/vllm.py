@@ -29,6 +29,7 @@ from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .dssd import DSSDConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -296,6 +297,8 @@ class VllmConfig:
     """
     profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
     """Profiling configuration."""
+    dssd_config: DSSDConfig | None = None
+    """DSSD edge/verifier configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -665,6 +668,9 @@ class VllmConfig:
             logger.info_once(
                 "Performance mode set to '%s'.", self.performance_mode, scope="local"
             )
+
+        if self.dssd_config is not None:
+            self.dssd_config.validate()
 
         self.try_verify_and_update_config()
 

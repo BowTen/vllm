@@ -368,6 +368,22 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
+    dssd_config = getattr(args, "dssd_config", None)
+    if dssd_config is None:
+        return
+
+    if isinstance(dssd_config, dict):
+        enabled = dssd_config.get("enabled", False)
+        role = dssd_config.get("role")
+        verifier_url = dssd_config.get("verifier_url")
+    else:
+        enabled = getattr(dssd_config, "enabled", False)
+        role = getattr(dssd_config, "role", None)
+        verifier_url = getattr(dssd_config, "verifier_url", None)
+
+    if enabled and role == "edge" and not verifier_url:
+        raise TypeError("Error: --dssd-config.role=edge requires verifier_url")
+
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
