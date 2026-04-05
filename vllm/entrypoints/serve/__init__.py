@@ -52,6 +52,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
+    from vllm.entrypoints.serve.dssd.api_router import (
+        attach_router as attach_dssd_router,
+    )
+
+    attach_dssd_router(app)
+
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)

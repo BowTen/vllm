@@ -372,6 +372,13 @@ async def init_app_state(
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
+    state.dssd_verifier_service = None
+    dssd_config = getattr(vllm_config, "dssd_config", None)
+    if dssd_config is not None and dssd_config.enabled:
+        from vllm.v1.dssd.verifier.service import DSSDVerifierService
+
+        state.dssd_verifier_service = DSSDVerifierService(engine_client, vllm_config)
+
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
