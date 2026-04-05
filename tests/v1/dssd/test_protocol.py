@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -36,9 +37,27 @@ _install_package_stub("vllm.v1.dssd", DSSD_DIR)
 protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 transport = _load_module("vllm.v1.dssd.transport", DSSD_DIR / "transport.py")
 
+BindVerifierResponse = protocol.BindVerifierResponse
 VerifyRoundRequest = protocol.VerifyRoundRequest
 VerifyRoundResponse = protocol.VerifyRoundResponse
 DSSDTransport = transport.DSSDTransport
+
+
+def test_bind_verifier_response_msgpack_round_trip():
+    resp = BindVerifierResponse(
+        binding_id="bind-1",
+        protocol_version="1.0",
+        verifier_model_id="qwen-verifier",
+        tokenizer_hash="tok-hash",
+        vocab_hash="vocab-hash",
+        supported_gamma_max=4,
+        capabilities={"network_transport": "http"},
+    )
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(resp),
+        type=BindVerifierResponse,
+    )
+    assert restored == resp
 
 
 def test_verify_round_request_msgpack_round_trip():
@@ -73,6 +92,19 @@ def test_verify_round_response_reject_shape():
     assert resp.reject_target_probs == [0.1, 0.9]
 
 
-def test_transport_is_abstract():
+def test_verify_round_request_requires_prefix_delta():
+    with pytest.raises(TypeError):
+        VerifyRoundRequest(
+            binding_id="bind-1",
+            verifier_session_id="vs-1",
+            seq_no=3,
+            draft_token_ids=[7, 8, 9],
+            q_values=[0.2, 0.3, 0.4],
+        )
+
+
+def test_transport_is_abstract_and_async():
     with pytest.raises(TypeError):
         DSSDTransport()
+    assert inspect.iscoroutinefunction(DSSDTransport.bind_verifier)
+    assert inspect.iscoroutinefunction(DSSDTransport.verify_round)

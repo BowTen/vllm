@@ -15,13 +15,13 @@ from .protocol import (
 
 class DSSDTransport(ABC):
     @abstractmethod
-    def bind_verifier(
+    async def bind_verifier(
         self, request: BindVerifierRequest
     ) -> BindVerifierResponse:
         raise NotImplementedError
 
     @abstractmethod
-    def verify_round(
+    async def verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
         raise NotImplementedError
