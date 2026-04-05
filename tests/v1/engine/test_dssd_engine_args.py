@@ -3,9 +3,11 @@
 
 import argparse
 from argparse import Namespace
+from collections import defaultdict
 import copy
 from dataclasses import dataclass, field
 import importlib.util
+import json
 from pathlib import Path
 import re
 import sys
@@ -1046,6 +1048,80 @@ def _prepare_engine_args_for_create_config(engine_args, arg_utils_mod):
     engine_args.tokens_only = False
 
 
+def _patch_get_kwargs_for_parser_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    arg_utils_mod,
+):
+    def _default_kwargs():
+        return {"default": None, "help": "", "type": str}
+
+    def _get_kwargs(_cls):
+        kwargs = defaultdict(_default_kwargs)
+        kwargs["model"] = {"default": "stub-model", "help": "", "type": str}
+        kwargs["served_model_name"] = {"default": None, "help": "", "type": str}
+        kwargs["middleware"] = {
+            "default": [],
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["allowed_origins"] = {
+            "default": ["*"],
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["allowed_methods"] = {
+            "default": ["*"],
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["allowed_headers"] = {
+            "default": ["*"],
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["api_key"] = {
+            "default": None,
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["lora_modules"] = {
+            "default": None,
+            "help": "",
+            "type": str,
+            "nargs": "+",
+        }
+        kwargs["collect_detailed_traces"] = {
+            "default": None,
+            "help": "",
+            "type": str,
+            "nargs": "+",
+            "choices": ["worker"],
+        }
+        kwargs["speculative_config"] = {
+            "default": None,
+            "help": "",
+            "type": json.loads,
+        }
+        kwargs["additional_config"] = {
+            "default": {},
+            "help": "",
+            "type": json.loads,
+        }
+        kwargs["dssd_config"] = {
+            "default": None,
+            "help": "",
+            "type": json.loads,
+        }
+        return kwargs
+
+    monkeypatch.setattr(arg_utils_mod, "get_kwargs", _get_kwargs)
+
+
 def test_validate_parsed_serve_args_rejects_edge_without_verifier_url(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1081,6 +1157,37 @@ def test_validate_parsed_serve_args_allows_verifier_role_without_verifier_url(
     )
 
     cli_args_mod.validate_parsed_serve_args(args)
+
+
+def test_parser_exposes_dssd_config_and_preserves_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dssd_mod, arg_utils_mod = _load_arg_utils_module(monkeypatch)
+    _patch_get_kwargs_for_parser_surface(monkeypatch, arg_utils_mod)
+
+    parser = arg_utils_mod.EngineArgs.add_cli_args(
+        arg_utils_mod.FlexibleArgumentParser()
+    )
+    args = parser.parse_args(
+        [
+            "--dssd-config",
+            (
+                '{"enabled": true, "role": "edge", "gamma": 4, '
+                '"verifier_url": "http://127.0.0.1:9001"}'
+            ),
+        ]
+    )
+
+    assert args.dssd_config["role"] == "edge"
+
+    engine_args = arg_utils_mod.EngineArgs.from_cli_args(args)
+    assert isinstance(engine_args.dssd_config, dssd_mod.DSSDConfig)
+
+    _prepare_engine_args_for_create_config(engine_args, arg_utils_mod)
+    vllm_config = engine_args.create_engine_config()
+
+    assert isinstance(vllm_config.dssd_config, dssd_mod.DSSDConfig)
+    assert vllm_config.dssd_config.verifier_url == "http://127.0.0.1:9001"
 
 
 def test_engine_args_from_cli_args_and_create_engine_config_preserve_dssd_config(
