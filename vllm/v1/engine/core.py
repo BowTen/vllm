@@ -218,7 +218,7 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
-        self.dssd_session_runner = DSSDSessionRunner()
+        self.dssd_session_runner = DSSDSessionRunner(self.model_executor)
 
         self._idle_state_callbacks: list[Callable] = []
 

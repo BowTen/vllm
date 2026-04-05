@@ -18,10 +18,11 @@ from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 
 class DSSDSessionRunner:
 
-    def __init__(self) -> None:
+    def __init__(self, model_executor: Any | None = None) -> None:
         self.edge_sessions = DSSDSessionStore()
         self.verifier_sessions = DSSDSessionStore()
         self.verifier_batcher = VerifierRoundBatcher()
+        self.model_executor = model_executor
 
     def create_edge_session(self, session_state: DSSDEdgeSessionState) -> None:
         self.edge_sessions.put(session_state.local_session_id, session_state)
@@ -29,6 +30,12 @@ class DSSDSessionRunner:
     def dssd_draft_round(self, request: DraftRoundRequest) -> DraftRoundResult:
         if not isinstance(request, DraftRoundRequest):
             raise TypeError("dssd_draft_round expects DraftRoundRequest")
+        if self.model_executor is not None:
+            result = self.model_executor.collective_rpc(
+                "dssd_draft_round",
+                args=(request,),
+            )
+            return result[0]
         return DraftRoundResult(
             draft_token_ids=[1] * request.gamma,
             q_values=[0.75] * request.gamma,
@@ -39,6 +46,12 @@ class DSSDSessionRunner:
     def dssd_verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
+        if self.model_executor is not None:
+            result = self.model_executor.collective_rpc(
+                "dssd_verify_round",
+                args=(request,),
+            )
+            return result[0]
         return VerifyRoundResponse(
             verifier_session_id=request.verifier_session_id,
             seq_no=request.seq_no,

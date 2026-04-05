@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -77,8 +78,24 @@ def test_draft_round_result_records_minimal_state():
     assert result.q_distributions == [[0.8, 0.2], [0.2, 0.8]]
 
 
-def test_session_runner_exposes_draft_round_placeholder():
-    runner = DSSDSessionRunner()
+def test_session_runner_uses_collective_rpc_for_draft_round():
+    expected = DraftRoundResult(
+        draft_token_ids=[9, 8],
+        q_values=[0.9, 0.8],
+        q_dists_handle="rpc-handle",
+        q_distributions=[[0.1, 0.9], [0.2, 0.8]],
+    )
+    model_executor = types.SimpleNamespace(
+        collective_rpc=Mock(return_value=[expected]),
+    )
+    runner = DSSDSessionRunner(model_executor=model_executor)
+    request = DraftRoundRequest(
+        local_session_id="edge-1",
+        prompt_token_ids=[1, 2, 3],
+        committed_token_ids=[],
+        seq_no=0,
+        gamma=2,
+    )
     runner.create_edge_session(
         DSSDEdgeSessionState(
             request_id="req-1",
@@ -88,21 +105,14 @@ def test_session_runner_exposes_draft_round_placeholder():
             prompt_token_ids=[1, 2, 3],
         )
     )
-    result = runner.dssd_draft_round(
-        DraftRoundRequest(
-            local_session_id="edge-1",
-            prompt_token_ids=[1, 2, 3],
-            committed_token_ids=[],
-            seq_no=0,
-            gamma=2,
-        )
-    )
+    result = runner.dssd_draft_round(request)
 
     assert isinstance(result, DraftRoundResult)
-    assert result.draft_token_ids == [1, 1]
-    assert result.q_values == [0.75, 0.75]
-    assert result.q_dists_handle == "edge-1:0"
-    assert result.q_distributions == [[0.25, 0.75], [0.25, 0.75]]
+    assert result == expected
+    model_executor.collective_rpc.assert_called_once_with(
+        "dssd_draft_round",
+        args=(request,),
+    )
 
 
 def test_session_runner_returns_typed_verify_round_response():
