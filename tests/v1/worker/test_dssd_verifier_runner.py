@@ -63,6 +63,12 @@ VerifierSessionInitRequest = session_runner_module.VerifierSessionInitRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 build_verifier_result = verifier_runner_module.build_verifier_result
 build_verifier_result_from_logits = verifier_runner_module.build_verifier_result_from_logits
+build_verifier_replay_request_view = (
+    verifier_runner_module.build_verifier_replay_request_view
+)
+build_verifier_replay_scheduler_output = (
+    verifier_runner_module.build_verifier_replay_scheduler_output
+)
 extract_forward_probs = verifier_runner_module.extract_forward_probs
 
 
@@ -252,3 +258,135 @@ def test_session_runner_keeps_committed_prefix_stable_across_retry():
         [1, 9],
         [1, 9],
     ]
+
+
+def test_build_verifier_replay_request_view_preserves_prefix_and_spec_layout():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=3,
+        committed_token_ids=[11, 12, 13],
+        draft_token_ids=[21, 22],
+        q_values=[0.6, 0.4],
+    )
+
+    view = build_verifier_replay_request_view(
+        request,
+        block_sizes=(4, 8),
+    )
+
+    assert view.request_id == "dssd-verify:vs-1:3"
+    assert view.prompt_token_ids == [11, 12, 13]
+    assert view.spec_token_ids == [21, 22]
+    assert view.num_scheduled_tokens == 5
+    assert view.block_ids == ([0, 1], [0])
+
+
+def test_build_verifier_replay_scheduler_output_uses_committed_prompt_and_spec_tokens():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-2",
+        seq_no=4,
+        committed_token_ids=[101, 102, 103],
+        draft_token_ids=[201, 202],
+        q_values=[0.3, 0.7],
+    )
+
+    view, scheduler_output = build_verifier_replay_scheduler_output(
+        request,
+        block_sizes=(4,),
+    )
+
+    assert scheduler_output.num_scheduled_tokens == {view.request_id: 5}
+    assert scheduler_output.total_num_scheduled_tokens == 5
+    assert scheduler_output.scheduled_spec_decode_tokens == {
+        view.request_id: [201, 202],
+    }
+
+    new_req = scheduler_output.scheduled_new_reqs[0]
+    assert new_req.req_id == "dssd-verify:vs-2:4"
+    assert new_req.prompt_token_ids == [101, 102, 103]
+    assert new_req.block_ids == ([0, 1],)
+    assert new_req.num_computed_tokens == 0
+    assert new_req.sampling_params.temperature == 0.0
+    assert new_req.sampling_params.max_tokens == 1
+
+
+def test_build_verifier_replay_request_view_rejects_empty_committed_prefix():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-3",
+        seq_no=0,
+        committed_token_ids=[],
+        draft_token_ids=[7],
+        q_values=[0.9],
+    )
+
+    with pytest.raises(ValueError, match="committed_token_ids"):
+        build_verifier_replay_request_view(request, block_sizes=(16,))
+
+
+def test_build_verifier_replay_request_view_rejects_empty_draft_token_ids():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-4",
+        seq_no=1,
+        committed_token_ids=[1],
+        draft_token_ids=[],
+        q_values=[],
+    )
+
+    with pytest.raises(ValueError, match="draft_token_ids"):
+        build_verifier_replay_request_view(request, block_sizes=(16,))
+
+
+def test_build_verifier_replay_request_view_rejects_mismatched_q_values():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-5",
+        seq_no=1,
+        committed_token_ids=[1],
+        draft_token_ids=[2, 3],
+        q_values=[0.7],
+    )
+
+    with pytest.raises(ValueError, match="q_values"):
+        build_verifier_replay_request_view(request, block_sizes=(16,))
+
+
+def test_build_verifier_replay_request_view_rejects_empty_block_sizes():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-6",
+        seq_no=1,
+        committed_token_ids=[1],
+        draft_token_ids=[2],
+        q_values=[0.5],
+    )
+
+    with pytest.raises(ValueError, match="block_sizes"):
+        build_verifier_replay_request_view(request, block_sizes=())
+
+
+def test_build_verifier_replay_scheduler_output_keeps_view_snapshot_stable():
+    request = DSSDVerifierExecutionRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-7",
+        seq_no=8,
+        committed_token_ids=[11, 12],
+        draft_token_ids=[21, 22],
+        q_values=[0.1, 0.9],
+    )
+
+    view, scheduler_output = build_verifier_replay_scheduler_output(
+        request,
+        block_sizes=(4, 8),
+    )
+
+    scheduler_output.scheduled_new_reqs[0].prompt_token_ids.append(99)
+    scheduler_output.scheduled_new_reqs[0].block_ids[0].append(7)
+    scheduler_output.scheduled_spec_decode_tokens[view.request_id].append(33)
+
+    assert view.prompt_token_ids == [11, 12]
+    assert view.spec_token_ids == [21, 22]
+    assert view.block_ids == ([0], [0])

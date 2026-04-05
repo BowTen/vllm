@@ -3,13 +3,31 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from math import ceil
+
 import torch
 
+from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.dssd.protocol import (
     DSSDVerifierExecutionRequest,
     VerifierForwardResult,
     VerifyRoundRequest,
 )
+
+
+@dataclass(frozen=True)
+class DSSDVerifierReplayRequestView:
+    request_id: str
+    prompt_token_ids: list[int]
+    spec_token_ids: list[int]
+    num_scheduled_tokens: int
+    block_ids: tuple[list[int], ...]
 
 
 def extract_forward_probs(
@@ -64,3 +82,64 @@ def build_verifier_result_from_logits(
         finished=finished,
         finish_reason=finish_reason,
     )
+
+
+def build_verifier_replay_request_view(
+    request: DSSDVerifierExecutionRequest,
+    *,
+    block_sizes: tuple[int, ...],
+) -> DSSDVerifierReplayRequestView:
+    if not request.committed_token_ids:
+        raise ValueError("DSSD verifier replay requires committed_token_ids")
+    if not request.draft_token_ids:
+        raise ValueError("DSSD verifier replay requires draft_token_ids")
+    if len(request.q_values) != len(request.draft_token_ids):
+        raise ValueError("q_values must align with draft_token_ids")
+    if not block_sizes:
+        raise ValueError("block_sizes must not be empty")
+
+    total_num_tokens = len(request.committed_token_ids) + len(request.draft_token_ids)
+    block_ids = tuple(
+        list(range(ceil(total_num_tokens / block_size)))
+        for block_size in block_sizes
+    )
+    return DSSDVerifierReplayRequestView(
+        request_id=f"dssd-verify:{request.verifier_session_id}:{request.seq_no}",
+        prompt_token_ids=list(request.committed_token_ids),
+        spec_token_ids=list(request.draft_token_ids),
+        num_scheduled_tokens=total_num_tokens,
+        block_ids=block_ids,
+    )
+
+
+def build_verifier_replay_scheduler_output(
+    request: DSSDVerifierExecutionRequest,
+    *,
+    block_sizes: tuple[int, ...],
+) -> tuple[DSSDVerifierReplayRequestView, SchedulerOutput]:
+    view = build_verifier_replay_request_view(request, block_sizes=block_sizes)
+    prompt_token_ids = list(view.prompt_token_ids)
+    spec_token_ids = list(view.spec_token_ids)
+    block_ids = tuple(list(block_id_list) for block_id_list in view.block_ids)
+    new_req = NewRequestData(
+        req_id=view.request_id,
+        prompt_token_ids=prompt_token_ids,
+        mm_features=[],
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+        pooling_params=None,
+        block_ids=block_ids,
+        num_computed_tokens=0,
+        lora_request=None,
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[new_req],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={view.request_id: view.num_scheduled_tokens},
+        total_num_scheduled_tokens=view.num_scheduled_tokens,
+        scheduled_spec_decode_tokens={view.request_id: spec_token_ids},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    return view, scheduler_output
