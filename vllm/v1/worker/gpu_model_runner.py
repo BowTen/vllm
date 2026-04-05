@@ -6716,6 +6716,9 @@ class GPUModelRunner(
     def dssd_verify_round(self, request: Any) -> Any:
         return request
 
+    def dssd_draft_round(self, request: Any) -> Any:
+        return request
+
 
 @dataclass
 class EncoderTimingStats:
