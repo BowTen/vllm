@@ -6,7 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from vllm.v1.dssd.protocol import DraftRoundRequest, VerifyRoundRequest, VerifyRoundResponse
+from vllm.v1.dssd.protocol import DraftRoundRequest, VerifyRoundRequest, VerifierForwardResult
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerBase, WorkerWrapperBase
@@ -58,12 +58,11 @@ def test_run_method_routes_dssd_verify_round_to_model_runner():
         draft_token_ids=[7, 8],
         q_values=[0.6, 0.4],
     )
-    expected = VerifyRoundResponse(
+    expected = VerifierForwardResult(
         verifier_session_id="vs-1",
         seq_no=2,
-        accepted_count=1,
-        all_accepted=True,
-        bonus_token_id=9,
+        seq_probs=[[0.1, 0.9], [0.2, 0.8]],
+        bonus_probs=[0.3, 0.7],
     )
     model_runner = SimpleNamespace(
         dssd_verify_round=Mock(return_value=expected),

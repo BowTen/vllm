@@ -41,6 +41,7 @@ BindVerifierResponse = protocol.BindVerifierResponse
 DraftRoundRequest = protocol.DraftRoundRequest
 CreateSessionRequest = protocol.CreateSessionRequest
 VerifyRoundRequest = protocol.VerifyRoundRequest
+VerifierForwardResult = protocol.VerifierForwardResult
 VerifyRoundResponse = protocol.VerifyRoundResponse
 DSSDTransport = transport.DSSDTransport
 
@@ -123,6 +124,22 @@ def test_verify_round_response_reject_shape():
     )
     assert resp.reject_index == 2
     assert resp.reject_target_probs == [0.1, 0.9]
+
+
+def test_verifier_forward_result_msgpack_round_trip():
+    result = VerifierForwardResult(
+        verifier_session_id="vs-1",
+        seq_no=3,
+        seq_probs=[[0.1, 0.9], [0.2, 0.8]],
+        bonus_probs=[0.3, 0.7],
+        finished=True,
+        finish_reason="stop",
+    )
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(result),
+        type=VerifierForwardResult,
+    )
+    assert restored == result
 
 
 def test_verify_round_request_requires_prefix_delta():

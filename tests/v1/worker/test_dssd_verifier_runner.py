@@ -43,23 +43,51 @@ _load_module("vllm.v1.dssd.edge.session", DSSD_EDGE_DIR / "session.py")
 _load_module("vllm.v1.dssd.engine.batch_planner", DSSD_ENGINE_DIR / "batch_planner.py")
 _load_module("vllm.v1.dssd.engine.session_store", DSSD_ENGINE_DIR / "session_store.py")
 _load_module("vllm.v1.dssd.worker.draft_runner", DSSD_DIR / "worker" / "draft_runner.py")
+verifier_runner_module = _load_module(
+    "vllm.v1.dssd.worker.verifier_runner",
+    DSSD_DIR / "worker" / "verifier_runner.py",
+)
 DSSDSessionRunner = _load_module(
     "vllm.v1.dssd.engine.session_runner",
     DSSD_DIR / "engine" / "session_runner.py",
 ).DSSDSessionRunner
 protocol_module = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
-VerifyRoundResponse = protocol_module.VerifyRoundResponse
+VerifierForwardResult = protocol_module.VerifierForwardResult
+build_verifier_result = verifier_runner_module.build_verifier_result
+
+
+def test_build_verifier_result_preserves_forward_prob_slices():
+    request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=2,
+        prefix_delta_token_ids=[4],
+        draft_token_ids=[7, 8],
+        q_values=[0.6, 0.4],
+    )
+
+    result = build_verifier_result(
+        request=request,
+        target_probs=[[0.2, 0.8], [0.9, 0.1], [0.7, 0.3]],
+        finished=True,
+        finish_reason="stop",
+    )
+
+    assert result.verifier_session_id == "vs-1"
+    assert result.seq_no == 2
+    assert result.seq_probs == [[0.2, 0.8], [0.9, 0.1]]
+    assert result.bonus_probs == [0.7, 0.3]
+    assert result.finished is True
+    assert result.finish_reason == "stop"
 
 
 def test_session_runner_uses_collective_rpc_for_verify_round():
-    expected = VerifyRoundResponse(
+    expected = VerifierForwardResult(
         verifier_session_id="vs-1",
         seq_no=2,
-        accepted_count=1,
-        all_accepted=True,
-        reject_index=None,
-        reject_target_probs=None,
+        seq_probs=[[0.1, 0.9], [0.2, 0.8]],
+        bonus_probs=[0.3, 0.7],
         finished=True,
         finish_reason="rpc-result",
     )

@@ -61,7 +61,7 @@ DSSDEdgeSessionState = edge_session_module.DSSDEdgeSessionState
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
 DraftRoundRequest = protocol_module.DraftRoundRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
-VerifyRoundResponse = protocol_module.VerifyRoundResponse
+VerifierForwardResult = protocol_module.VerifierForwardResult
 
 
 def test_draft_round_result_records_minimal_state():
@@ -129,6 +129,7 @@ def test_session_runner_returns_typed_verify_round_response():
         )
     )
 
-    assert isinstance(result, VerifyRoundResponse)
     assert result.verifier_session_id == "vs-1"
     assert result.seq_no == 2
+    assert len(result.seq_probs) == 2
+    assert len(result.bonus_probs) == 9

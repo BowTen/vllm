@@ -33,8 +33,8 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.dssd.protocol import (
     DraftRoundRequest,
+    VerifierForwardResult,
     VerifyRoundRequest,
-    VerifyRoundResponse,
 )
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.engine import (
@@ -267,7 +267,7 @@ class EngineCoreClient(ABC):
 
     async def dssd_verify_round_async(
         self, request: VerifyRoundRequest
-    ) -> VerifyRoundResponse:
+    ) -> VerifierForwardResult:
         raise NotImplementedError
 
     async def dssd_draft_round_async(
@@ -1164,7 +1164,7 @@ class AsyncMPClient(MPClient):
 
     async def dssd_verify_round_async(
         self, request: VerifyRoundRequest
-    ) -> VerifyRoundResponse:
+    ) -> VerifierForwardResult:
         return await self.call_utility_async("dssd_verify_round", request)
 
     async def dssd_draft_round_async(

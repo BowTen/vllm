@@ -39,8 +39,8 @@ from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.dssd.engine.session_runner import DSSDSessionRunner
 from vllm.v1.dssd.protocol import (
     DraftRoundRequest,
+    VerifierForwardResult,
     VerifyRoundRequest,
-    VerifyRoundResponse,
 )
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.core.kv_cache_utils import (
@@ -298,7 +298,7 @@ class EngineCore:
 
     def dssd_verify_round(
         self, request: VerifyRoundRequest
-    ) -> VerifyRoundResponse:
+    ) -> VerifierForwardResult:
         return self.dssd_session_runner.dssd_verify_round(request)
 
     def dssd_draft_round(

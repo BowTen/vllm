@@ -10,10 +10,11 @@ from vllm.v1.dssd.engine.batch_planner import VerifierRoundBatcher
 from vllm.v1.dssd.engine.session_store import DSSDSessionStore
 from vllm.v1.dssd.protocol import (
     DraftRoundRequest,
+    VerifierForwardResult,
     VerifyRoundRequest,
-    VerifyRoundResponse,
 )
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
+from vllm.v1.dssd.worker.verifier_runner import build_verifier_result
 
 
 class DSSDSessionRunner:
@@ -45,20 +46,25 @@ class DSSDSessionRunner:
 
     def dssd_verify_round(
         self, request: VerifyRoundRequest
-    ) -> VerifyRoundResponse:
+    ) -> VerifierForwardResult:
         if self.model_executor is not None:
             result = self.model_executor.collective_rpc(
                 "dssd_verify_round",
                 args=(request,),
             )
             return result[0]
-        return VerifyRoundResponse(
-            verifier_session_id=request.verifier_session_id,
-            seq_no=request.seq_no,
-            accepted_count=0,
-            all_accepted=False,
-            reject_index=0,
-            reject_target_probs=[1.0],
-            finished=False,
-            finish_reason="placeholder",
+        vocab_size = max(request.draft_token_ids, default=0) + 1
+        vocab_size = max(vocab_size, 1)
+        target_probs = []
+        for token_id in request.draft_token_ids:
+            probs = [0.0] * vocab_size
+            probs[token_id] = 1.0
+            target_probs.append(probs)
+        bonus_probs = [0.0] * vocab_size
+        bonus_probs[0] = 1.0
+        target_probs.append(bonus_probs)
+        return build_verifier_result(
+            request=request,
+            target_probs=target_probs,
+            finish_reason="placeholder-forward",
         )

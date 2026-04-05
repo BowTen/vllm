@@ -6714,19 +6714,25 @@ class GPUModelRunner(
                     stats.num_encoder_calls += 1
 
     def dssd_verify_round(self, request: Any) -> Any:
-        from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
+        from vllm.v1.dssd.protocol import VerifyRoundRequest
+        from vllm.v1.dssd.worker.verifier_runner import build_verifier_result
 
         if not isinstance(request, VerifyRoundRequest):
             raise TypeError("dssd_verify_round expects VerifyRoundRequest")
-        return VerifyRoundResponse(
-            verifier_session_id=request.verifier_session_id,
-            seq_no=request.seq_no,
-            accepted_count=0,
-            all_accepted=False,
-            reject_index=0,
-            reject_target_probs=[1.0],
-            finished=False,
-            finish_reason="placeholder",
+        vocab_size = max(request.draft_token_ids, default=0) + 1
+        vocab_size = max(vocab_size, 1)
+        target_probs = []
+        for token_id in request.draft_token_ids:
+            probs = [0.0] * vocab_size
+            probs[token_id] = 1.0
+            target_probs.append(probs)
+        bonus_probs = [0.0] * vocab_size
+        bonus_probs[0] = 1.0
+        target_probs.append(bonus_probs)
+        return build_verifier_result(
+            request=request,
+            target_probs=target_probs,
+            finish_reason="placeholder-forward",
         )
 
     def dssd_draft_round(self, request: Any) -> Any:
