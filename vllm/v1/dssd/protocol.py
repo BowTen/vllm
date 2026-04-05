@@ -40,6 +40,14 @@ class CreateSessionResponse(msgspec.Struct, omit_defaults=True):
     expires_at: float | None = None
 
 
+class DraftRoundRequest(msgspec.Struct, omit_defaults=True):
+    local_session_id: str
+    prompt_token_ids: list[int]
+    committed_token_ids: list[int]
+    seq_no: int
+    gamma: int
+
+
 class VerifyRoundRequest(msgspec.Struct, omit_defaults=True):
     binding_id: str
     verifier_session_id: str

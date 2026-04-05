@@ -8,7 +8,11 @@ from typing import Any
 from vllm.v1.dssd.edge.session import DSSDEdgeSessionState
 from vllm.v1.dssd.engine.batch_planner import VerifierRoundBatcher
 from vllm.v1.dssd.engine.session_store import DSSDSessionStore
-from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
+from vllm.v1.dssd.protocol import (
+    DraftRoundRequest,
+    VerifyRoundRequest,
+    VerifyRoundResponse,
+)
 from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 
 
@@ -22,12 +26,14 @@ class DSSDSessionRunner:
     def create_edge_session(self, session_state: DSSDEdgeSessionState) -> None:
         self.edge_sessions.put(session_state.local_session_id, session_state)
 
-    def dssd_draft_round(self, request: Any) -> DraftRoundResult:
-        del request
+    def dssd_draft_round(self, request: DraftRoundRequest) -> DraftRoundResult:
+        if not isinstance(request, DraftRoundRequest):
+            raise TypeError("dssd_draft_round expects DraftRoundRequest")
         return DraftRoundResult(
-            draft_token_ids=[],
-            q_values=[],
-            q_dists_handle="",
+            draft_token_ids=[1] * request.gamma,
+            q_values=[0.75] * request.gamma,
+            q_dists_handle=f"{request.local_session_id}:{request.seq_no}",
+            q_distributions=[[0.25, 0.75]] * request.gamma,
         )
 
     def dssd_verify_round(

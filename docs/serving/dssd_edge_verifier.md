@@ -30,7 +30,13 @@ vllm serve Qwen/Qwen3.5-7B-Instruct \
 - Use the same `gamma` on both sides.
 - The current branch wires `bind/create_session/verify_round/close_session`
   over HTTP and enters the DSSD edge control path from `/v1/chat/completions`.
-- The edge round loop still fails closed with `501 Not Implemented`; it no
-  longer falls back to the normal local generate path.
+- The edge path now completes a single synchronous DSSD round:
+  `draft_round -> verify_round -> optional residual resample -> response`.
+- The edge path closes the verifier session at request end and enforces
+  `max_tokens` / `stop_token_ids` on the returned completion.
+- The current draft/verifier worker hooks are still placeholder
+  implementations; this is a serving-path bring-up, not the final algorithmic
+  implementation.
+- Streaming chat completions are still not implemented in DSSD edge mode.
 - Network simulation is currently limited to latency and bandwidth delays in the
   HTTP transport; it is not yet a full network emulator.

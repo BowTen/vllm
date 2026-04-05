@@ -58,6 +58,7 @@ session_runner_module = _load_module(
 DraftRoundResult = draft_runner_module.DraftRoundResult
 DSSDEdgeSessionState = edge_session_module.DSSDEdgeSessionState
 DSSDSessionRunner = session_runner_module.DSSDSessionRunner
+DraftRoundRequest = protocol_module.DraftRoundRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 VerifyRoundResponse = protocol_module.VerifyRoundResponse
 
@@ -67,11 +68,13 @@ def test_draft_round_result_records_minimal_state():
         draft_token_ids=[7, 8],
         q_values=[0.2, 0.8],
         q_dists_handle="draft-handle",
+        q_distributions=[[0.8, 0.2], [0.2, 0.8]],
     )
 
     assert result.draft_token_ids == [7, 8]
     assert result.q_values == [0.2, 0.8]
     assert result.q_dists_handle == "draft-handle"
+    assert result.q_distributions == [[0.8, 0.2], [0.2, 0.8]]
 
 
 def test_session_runner_exposes_draft_round_placeholder():
@@ -85,12 +88,21 @@ def test_session_runner_exposes_draft_round_placeholder():
             prompt_token_ids=[1, 2, 3],
         )
     )
-    result = runner.dssd_draft_round(object())
+    result = runner.dssd_draft_round(
+        DraftRoundRequest(
+            local_session_id="edge-1",
+            prompt_token_ids=[1, 2, 3],
+            committed_token_ids=[],
+            seq_no=0,
+            gamma=2,
+        )
+    )
 
     assert isinstance(result, DraftRoundResult)
-    assert result.draft_token_ids == []
-    assert result.q_values == []
-    assert result.q_dists_handle == ""
+    assert result.draft_token_ids == [1, 1]
+    assert result.q_values == [0.75, 0.75]
+    assert result.q_dists_handle == "edge-1:0"
+    assert result.q_distributions == [[0.25, 0.75], [0.25, 0.75]]
 
 
 def test_session_runner_returns_typed_verify_round_response():

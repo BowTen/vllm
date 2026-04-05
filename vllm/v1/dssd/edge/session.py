@@ -13,6 +13,7 @@ class DSSDEdgeRoundCache:
     draft_token_ids: list[int]
     q_values: list[float]
     q_dists_handle: str
+    q_distributions: list[list[float]] | None = None
 
 
 @dataclass

@@ -6734,9 +6734,10 @@ class GPUModelRunner(
 
         del request
         return DraftRoundResult(
-            draft_token_ids=[],
-            q_values=[],
-            q_dists_handle="",
+            draft_token_ids=[1],
+            q_values=[0.75],
+            q_dists_handle="gpu:0",
+            q_distributions=[[0.25, 0.75]],
         )
 
 

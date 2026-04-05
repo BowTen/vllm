@@ -42,6 +42,7 @@ resample_module = _load_module(
 )
 
 compute_residual_distribution = resample_module.compute_residual_distribution
+select_residual_token = resample_module.select_residual_token
 
 
 def test_compute_residual_distribution_clamps_negative_mass():
@@ -52,3 +53,12 @@ def test_compute_residual_distribution_clamps_negative_mass():
 
     assert torch.all(residual >= 0)
     assert torch.isclose(residual.sum(), torch.tensor(1.0))
+
+
+def test_select_residual_token_picks_max_mass_token():
+    p = torch.tensor([0.9, 0.1])
+    q = torch.tensor([0.8, 0.2])
+
+    token_id = select_residual_token(p, q)
+
+    assert token_id == 0

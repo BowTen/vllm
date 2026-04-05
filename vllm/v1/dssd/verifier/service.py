@@ -17,10 +17,13 @@ from vllm.v1.dssd.protocol import (
     VerifyRoundRequest,
     VerifyRoundResponse,
 )
+from vllm.v1.dssd.tokenizer_utils import compute_tokenizer_fingerprints
 from vllm.v1.dssd.verifier.session import DSSDVerifierSessionManager
 
 
 class DSSDVerifierService:
+    PROTOCOL_VERSION = "v1alpha1"
+
     def __init__(self, engine_client, vllm_config) -> None:
         self.engine_client = engine_client
         self.vllm_config = vllm_config
@@ -44,10 +47,10 @@ class DSSDVerifierService:
         )
         return BindVerifierResponse(
             binding_id=binding_id,
-            protocol_version=request.protocol_version,
+            protocol_version=self.PROTOCOL_VERSION,
             verifier_model_id=verifier_model_id,
-            tokenizer_hash=request.tokenizer_hash,
-            vocab_hash=request.vocab_hash,
+            tokenizer_hash=self._tokenizer_hash(),
+            vocab_hash=self._vocab_hash(),
             supported_gamma_max=supported_gamma_max,
             capabilities={
                 "session_lifecycle": "bind/create/verify/close",
@@ -91,14 +94,14 @@ class DSSDVerifierService:
             request.verifier_session_id,
             request.seq_no,
         )
-        self.session_manager.append_prefix_delta(
-            request.verifier_session_id,
-            request.prefix_delta_token_ids,
-        )
 
         response = await self.engine_client.dssd_verify_round_async(request)
         if not isinstance(response, VerifyRoundResponse):
             response = msgspec.convert(response, type=VerifyRoundResponse)
+        self.session_manager.append_prefix_delta(
+            request.verifier_session_id,
+            request.prefix_delta_token_ids,
+        )
         self.session_manager.cache_response(
             request.verifier_session_id,
             seq_no=request.seq_no,
@@ -120,3 +123,22 @@ class DSSDVerifierService:
     def _ensure_binding(self, binding_id: str) -> None:
         if binding_id not in self._bindings:
             raise ValueError("unknown verifier binding")
+
+    def _tokenizer_hash(self) -> str:
+        tokenizer = self._tokenizer_for_fingerprint()
+        tokenizer_hash, _ = compute_tokenizer_fingerprints(tokenizer)
+        return tokenizer_hash
+
+    def _vocab_hash(self) -> str:
+        tokenizer = self._tokenizer_for_fingerprint()
+        _, vocab_hash = compute_tokenizer_fingerprints(tokenizer)
+        return vocab_hash
+
+    def _tokenizer_for_fingerprint(self):
+        renderer = getattr(self.engine_client, "renderer", None)
+        if renderer is None:
+            return None
+        tokenizer_getter = getattr(renderer, "get_tokenizer", None)
+        if callable(tokenizer_getter):
+            return tokenizer_getter()
+        return getattr(renderer, "tokenizer", None)

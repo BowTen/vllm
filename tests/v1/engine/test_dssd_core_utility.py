@@ -161,6 +161,7 @@ core_client_module = _load_module(
 )
 
 VerifyRoundRequest = protocol.VerifyRoundRequest
+DraftRoundRequest = protocol.DraftRoundRequest
 DSSDSessionStore = session_store_module.DSSDSessionStore
 AsyncMPClient = core_client_module.AsyncMPClient
 
@@ -183,6 +184,25 @@ async def test_async_client_exposes_verify_round_utility():
 
     assert result == "ok"
     client.call_utility_async.assert_awaited_once_with("dssd_verify_round", request)
+
+
+@pytest.mark.asyncio
+async def test_async_client_exposes_draft_round_utility():
+    client = object.__new__(AsyncMPClient)
+    client.call_utility_async = AsyncMock(return_value="draft-ok")
+
+    request = DraftRoundRequest(
+        local_session_id="edge-1",
+        prompt_token_ids=[1, 2],
+        committed_token_ids=[3],
+        seq_no=0,
+        gamma=2,
+    )
+
+    result = await AsyncMPClient.dssd_draft_round_async(client, request)
+
+    assert result == "draft-ok"
+    client.call_utility_async.assert_awaited_once_with("dssd_draft_round", request)
 
 
 def test_session_store_round_trip():

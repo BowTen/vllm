@@ -31,7 +31,12 @@ from vllm.utils.network_utils import (
     get_open_zmq_inproc_path,
     make_zmq_socket,
 )
-from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
+from vllm.v1.dssd.protocol import (
+    DraftRoundRequest,
+    VerifyRoundRequest,
+    VerifyRoundResponse,
+)
+from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
@@ -263,6 +268,11 @@ class EngineCoreClient(ABC):
     async def dssd_verify_round_async(
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
+        raise NotImplementedError
+
+    async def dssd_draft_round_async(
+        self, request: DraftRoundRequest
+    ) -> DraftRoundResult:
         raise NotImplementedError
 
     async def collective_rpc_async(
@@ -1156,6 +1166,11 @@ class AsyncMPClient(MPClient):
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
         return await self.call_utility_async("dssd_verify_round", request)
+
+    async def dssd_draft_round_async(
+        self, request: DraftRoundRequest
+    ) -> DraftRoundResult:
+        return await self.call_utility_async("dssd_draft_round", request)
 
     async def collective_rpc_async(
         self,

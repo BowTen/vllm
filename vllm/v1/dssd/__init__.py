@@ -8,6 +8,7 @@ from .protocol import (
     CloseSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DraftRoundRequest,
     VerifyRoundRequest,
     VerifyRoundResponse,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "CreateSessionRequest",
     "CreateSessionResponse",
     "DSSDTransport",
+    "DraftRoundRequest",
     "HTTPDSSDTransport",
     "VerifyRoundRequest",
     "VerifyRoundResponse",

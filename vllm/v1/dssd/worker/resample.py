@@ -14,3 +14,9 @@ def compute_residual_distribution(
     if total.item() <= 0:
         raise ValueError("residual distribution has no positive mass")
     return residual / total
+
+
+def select_residual_token(p: torch.Tensor, q: torch.Tensor) -> int:
+    residual = compute_residual_distribution(p, q)
+    token_id = torch.multinomial(residual, num_samples=1)
+    return int(token_id.item())

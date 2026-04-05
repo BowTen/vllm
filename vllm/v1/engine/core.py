@@ -37,7 +37,12 @@ from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.dssd.engine.session_runner import DSSDSessionRunner
-from vllm.v1.dssd.protocol import VerifyRoundRequest, VerifyRoundResponse
+from vllm.v1.dssd.protocol import (
+    DraftRoundRequest,
+    VerifyRoundRequest,
+    VerifyRoundResponse,
+)
+from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -295,6 +300,11 @@ class EngineCore:
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
         return self.dssd_session_runner.dssd_verify_round(request)
+
+    def dssd_draft_round(
+        self, request: DraftRoundRequest
+    ) -> DraftRoundResult:
+        return self.dssd_session_runner.dssd_draft_round(request)
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
