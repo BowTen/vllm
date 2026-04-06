@@ -127,6 +127,7 @@ worker_base_module = _load_module(
 DraftRoundRequest = protocol_module.DraftRoundRequest
 VerifyRoundRequest = protocol_module.VerifyRoundRequest
 DSSDVerifierExecutionRequest = protocol_module.DSSDVerifierExecutionRequest
+CloseSessionRequest = protocol_module.CloseSessionRequest
 VerifierForwardResult = protocol_module.VerifierForwardResult
 DraftRoundResult = draft_runner_module.DraftRoundResult
 run_method = serial_utils_module.run_method
@@ -195,3 +196,19 @@ def test_run_method_routes_dssd_verify_round_to_model_runner():
 
     assert result == expected
     model_runner.dssd_verify_round.assert_called_once_with(request)
+
+
+def test_run_method_routes_dssd_close_verifier_session_to_model_runner():
+    request = CloseSessionRequest(
+        verifier_session_id="vs-1",
+        reason="done",
+    )
+    model_runner = SimpleNamespace(
+        dssd_close_verifier_session=Mock(return_value=True),
+    )
+    wrapper = _make_wrapper(worker=_make_worker(model_runner=model_runner))
+
+    result = run_method(wrapper, "dssd_close_verifier_session", (request,), {})
+
+    assert result is True
+    model_runner.dssd_close_verifier_session.assert_called_once_with(request)

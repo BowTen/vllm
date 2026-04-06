@@ -149,6 +149,8 @@ class DSSDVerifierService:
             engine_closed = await self.engine_client.dssd_close_verifier_session_async(
                 request
             )
+            if engine_closed is None:
+                engine_closed = True
         return CloseSessionResponse(
             closed=engine_closed
             and self.session_manager.delete_session(request.verifier_session_id)

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import msgspec
 
+from vllm.sampling_params import SamplingParams
+
 
 class BindVerifierRequest(msgspec.Struct, omit_defaults=True):
     protocol_version: str
@@ -58,6 +60,7 @@ class DraftRoundRequest(msgspec.Struct, omit_defaults=True):
     committed_token_ids: list[int]
     seq_no: int
     gamma: int
+    sampling_params: SamplingParams | None = None
 
 
 class VerifyRoundRequest(msgspec.Struct, omit_defaults=True):

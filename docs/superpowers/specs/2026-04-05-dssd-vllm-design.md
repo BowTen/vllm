@@ -1,5 +1,12 @@
 # 基于 vLLM 的 DSSD 边云分布式投机采样系统设计
 
+> **Reference Note**
+>
+> This document remains the baseline system design reference for DSSD on vLLM.
+> Workflow ownership has moved to OpenSpec:
+> use [openspec/program.md](/home/zz/workspace/vllm/.worktrees/dssd-vllm-codex/openspec/program.md)
+> for current program status and `openspec/changes/` for active work.
+
 **目标**
 
 在 vLLM 上实现一个贴近 DSSD 原始算法的边云分布式投机采样原型系统。系统的对外入口位于边端，边端部署草稿模型并直接服务用户请求；云端部署目标模型并作为 verifier 服务，为边端的每一轮 draft 提供 Accept/Reject 验证。开发与实验阶段在一台双 4090 机器上双端部署，但系统边界必须从一开始就按真实网络通信来设计。

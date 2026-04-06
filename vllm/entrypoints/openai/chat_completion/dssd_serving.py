@@ -28,6 +28,12 @@ class DSSDEdgeServingChat(OpenAIServingChat):
         )
 
     async def create_chat_completion(self, request, raw_request=None):
+        if request.stream:
+            return self.round_coordinator.create_chat_completion_stream(
+                request=request,
+                raw_request=raw_request,
+                serving=self,
+            )
         return await self.round_coordinator.create_chat_completion(
             request=request,
             raw_request=raw_request,

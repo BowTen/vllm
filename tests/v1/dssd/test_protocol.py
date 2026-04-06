@@ -4,8 +4,12 @@ import importlib.util
 import inspect
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
 
+import msgspec
 import msgspec.msgpack
 import pytest
 
@@ -30,23 +34,105 @@ def _load_module(module_name: str, file_path: Path):
     return module
 
 
-_install_package_stub("vllm", VLLM_DIR)
-_install_package_stub("vllm.v1", VLLM_DIR / "v1")
-_install_package_stub("vllm.v1.dssd", DSSD_DIR)
+protocol = None
+transport = None
+dssd_package = None
+BindVerifierResponse = None
+DraftRoundRequest = None
+CreateSessionRequest = None
+VerifierSessionInitRequest = None
+VerifyRoundRequest = None
+DSSDVerifierExecutionRequest = None
+VerifierForwardResult = None
+VerifyRoundResponse = None
+DSSDTransport = None
+SamplingParams = None
 
-protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
-transport = _load_module("vllm.v1.dssd.transport", DSSD_DIR / "transport.py")
-dssd_package = _load_module("vllm.v1.dssd", DSSD_DIR / "__init__.py")
 
-BindVerifierResponse = protocol.BindVerifierResponse
-DraftRoundRequest = protocol.DraftRoundRequest
-CreateSessionRequest = protocol.CreateSessionRequest
-VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
-VerifyRoundRequest = protocol.VerifyRoundRequest
-DSSDVerifierExecutionRequest = protocol.DSSDVerifierExecutionRequest
-VerifierForwardResult = protocol.VerifierForwardResult
-VerifyRoundResponse = protocol.VerifyRoundResponse
-DSSDTransport = transport.DSSDTransport
+@contextmanager
+def _protocol_modules() -> Iterator[SimpleNamespace]:
+    saved_vllm_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "vllm" or name.startswith("vllm.")
+    }
+
+    try:
+        _install_package_stub("vllm", VLLM_DIR)
+        _install_package_stub("vllm.v1", VLLM_DIR / "v1")
+        _install_package_stub("vllm.v1.dssd", DSSD_DIR)
+
+        sampling_params_module = types.ModuleType("vllm.sampling_params")
+
+        class _SamplingParams(msgspec.Struct, omit_defaults=True):
+            temperature: float = 1.0
+            top_p: float = 1.0
+            top_k: int = 0
+            min_p: float = 0.0
+            seed: int | None = None
+            max_tokens: int | None = 16
+
+        sampling_params_module.SamplingParams = _SamplingParams
+        sys.modules["vllm.sampling_params"] = sampling_params_module
+
+        protocol_module = _load_module(
+            "vllm.v1.dssd.protocol",
+            DSSD_DIR / "protocol.py",
+        )
+        transport_module = _load_module(
+            "vllm.v1.dssd.transport",
+            DSSD_DIR / "transport.py",
+        )
+        dssd_package_module = _load_module(
+            "vllm.v1.dssd",
+            DSSD_DIR / "__init__.py",
+        )
+
+        yield SimpleNamespace(
+            protocol=protocol_module,
+            transport=transport_module,
+            dssd_package=dssd_package_module,
+            SamplingParams=sampling_params_module.SamplingParams,
+        )
+    finally:
+        for name in list(sys.modules):
+            if name == "vllm" or name.startswith("vllm."):
+                if name not in saved_vllm_modules:
+                    sys.modules.pop(name, None)
+        sys.modules.update(saved_vllm_modules)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _install_protocol_modules() -> Iterator[None]:
+    global protocol
+    global transport
+    global dssd_package
+    global BindVerifierResponse
+    global DraftRoundRequest
+    global CreateSessionRequest
+    global VerifierSessionInitRequest
+    global VerifyRoundRequest
+    global DSSDVerifierExecutionRequest
+    global VerifierForwardResult
+    global VerifyRoundResponse
+    global DSSDTransport
+    global SamplingParams
+
+    with _protocol_modules() as modules:
+        protocol = modules.protocol
+        transport = modules.transport
+        dssd_package = modules.dssd_package
+        BindVerifierResponse = protocol.BindVerifierResponse
+        DraftRoundRequest = protocol.DraftRoundRequest
+        CreateSessionRequest = protocol.CreateSessionRequest
+        VerifierSessionInitRequest = protocol.VerifierSessionInitRequest
+        VerifyRoundRequest = protocol.VerifyRoundRequest
+        DSSDVerifierExecutionRequest = protocol.DSSDVerifierExecutionRequest
+        VerifierForwardResult = protocol.VerifierForwardResult
+        VerifyRoundResponse = protocol.VerifyRoundResponse
+        DSSDTransport = transport.DSSDTransport
+        SamplingParams = modules.SamplingParams
+        yield
 
 
 def test_bind_verifier_response_msgpack_round_trip():
@@ -145,6 +231,43 @@ def test_draft_round_request_msgpack_round_trip():
         type=DraftRoundRequest,
     )
     assert restored == req
+    assert restored.sampling_params is None
+
+
+def test_draft_round_request_msgpack_round_trip_with_sampling_params():
+    req = DraftRoundRequest(
+        local_session_id="edge-1",
+        prompt_token_ids=[1, 2, 3],
+        committed_token_ids=[4],
+        seq_no=2,
+        gamma=4,
+        sampling_params=SamplingParams(
+            temperature=0.7,
+            top_p=0.8,
+            top_k=12,
+            min_p=0.05,
+            seed=123,
+            max_tokens=32,
+        ),
+    )
+
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(req),
+        type=DraftRoundRequest,
+    )
+
+    assert restored.local_session_id == req.local_session_id
+    assert restored.prompt_token_ids == req.prompt_token_ids
+    assert restored.committed_token_ids == req.committed_token_ids
+    assert restored.seq_no == req.seq_no
+    assert restored.gamma == req.gamma
+    assert restored.sampling_params is not None
+    assert restored.sampling_params.temperature == req.sampling_params.temperature
+    assert restored.sampling_params.top_p == req.sampling_params.top_p
+    assert restored.sampling_params.top_k == req.sampling_params.top_k
+    assert restored.sampling_params.min_p == req.sampling_params.min_p
+    assert restored.sampling_params.seed == req.sampling_params.seed
+    assert restored.sampling_params.max_tokens == req.sampling_params.max_tokens
 
 
 def test_verifier_session_init_request_msgpack_round_trip():

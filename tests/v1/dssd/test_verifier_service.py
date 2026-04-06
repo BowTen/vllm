@@ -350,3 +350,60 @@ async def test_verifier_service_syncs_engine_session_lifecycle():
         engine.close_requests[0].verifier_session_id
         == session_response.verifier_session_id
     )
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_treats_none_close_result_as_success():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+            self.create_requests = []
+            self.close_requests = []
+
+        async def dssd_create_verifier_session_async(self, request):
+            self.create_requests.append(request)
+            return True
+
+        async def dssd_close_verifier_session_async(self, request):
+            self.close_requests.append(request)
+            return None
+
+    engine = _Engine()
+    service = DSSDVerifierService(
+        engine,
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response = await service.bind_verifier(
+        BindVerifierRequest(
+            protocol_version="v1alpha1",
+            edge_instance_id="edge-1",
+            tokenizer_hash="tok",
+            vocab_hash="voc",
+            supported_gamma_max=2,
+        )
+    )
+
+    session_response = await service.create_session(
+        CreateSessionRequest(
+            binding_id=bind_response.binding_id,
+            request_id="req-5",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params_digest="sp-5",
+            max_new_tokens=8,
+            stop_token_ids=[],
+        )
+    )
+
+    close_response = await service.close_session(
+        protocol_module.CloseSessionRequest(
+            verifier_session_id=session_response.verifier_session_id,
+            reason="done",
+        )
+    )
+
+    assert close_response.closed is True
+    assert len(engine.close_requests) == 1
+    with pytest.raises(ValueError, match="unknown verifier session"):
+        service.session_manager.get_session(session_response.verifier_session_id)

@@ -98,7 +98,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingType
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
@@ -126,7 +126,11 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1412,6 +1416,163 @@ class GPUModelRunner(
             self._init_mrope_positions(req_state)
 
         return req_state
+
+    def _make_verifier_replay_block_ids(
+        self,
+        total_num_tokens: int,
+    ) -> tuple[list[int], ...]:
+        return tuple(
+            list(range(cdiv(total_num_tokens, group.kv_cache_spec.block_size)))
+            for group in self.kv_cache_config.kv_cache_groups
+        )
+
+    def _make_verifier_replay_scheduler_output(
+        self,
+        *,
+        request_id: str,
+        num_scheduled_tokens: int,
+        draft_token_ids: list[int],
+    ) -> SchedulerOutput:
+        scheduled_spec_decode_tokens = {}
+        if draft_token_ids:
+            scheduled_spec_decode_tokens[request_id] = list(draft_token_ids)
+
+        return SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={request_id: num_scheduled_tokens},
+            total_num_scheduled_tokens=num_scheduled_tokens,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+    def _cleanup_verifier_replay_scratch_request(self, request_id: str) -> None:
+        removed = self.input_batch.remove_request(request_id)
+        if removed is not None:
+            self.input_batch.condense()
+        if self.requests.pop(request_id, None) is not None:
+            self.late_interaction_runner.on_requests_finished({request_id})
+        self.num_prompt_logprobs.pop(request_id, None)
+
+    def _cleanup_verifier_replay_scratch_requests(
+        self, request_ids: Sequence[str]
+    ) -> None:
+        for request_id in request_ids:
+            self._cleanup_verifier_replay_scratch_request(request_id)
+
+    def _prepare_verifier_replay_batch(
+        self,
+        *,
+        replay_requests: Sequence[dict[str, object]],
+    ) -> SchedulerOutput:
+        if not replay_requests:
+            raise ValueError("replay_requests must not be empty")
+
+        req_states: list[CachedRequestState] = []
+        num_scheduled_tokens: dict[str, int] = {}
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        total_num_scheduled_tokens = 0
+
+        for replay_request in replay_requests:
+            request_id = cast(str, replay_request["request_id"])
+            committed_token_ids = list(
+                cast(list[int], replay_request["committed_token_ids"])
+            )
+            draft_token_ids = list(cast(list[int], replay_request["draft_token_ids"]))
+
+            self._cleanup_verifier_replay_scratch_request(request_id)
+
+            total_num_tokens = len(committed_token_ids) + len(draft_token_ids)
+            block_ids = self._make_verifier_replay_block_ids(total_num_tokens)
+            req_state = CachedRequestState(
+                req_id=request_id,
+                prompt_token_ids=committed_token_ids,
+                prompt_embeds=None,
+                mm_features=[],
+                sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+                pooling_params=None,
+                generator=None,
+                block_ids=block_ids,
+                num_computed_tokens=0,
+                output_token_ids=[],
+                lora_request=None,
+            )
+            self.requests[request_id] = req_state
+            self.late_interaction_runner.register_request(request_id, None)
+            self.input_batch.add_request(req_state)
+            req_states.append(req_state)
+            num_scheduled_tokens[request_id] = total_num_tokens
+            total_num_scheduled_tokens += total_num_tokens
+            if draft_token_ids:
+                scheduled_spec_decode_tokens[request_id] = draft_token_ids
+
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+        for req_state in req_states:
+            self.input_batch.update_req_spec_token_ids(
+                req_state,
+                scheduler_output.scheduled_spec_decode_tokens,
+            )
+        self.input_batch.condense()
+        self._may_reorder_batch(scheduler_output)
+        self.input_batch.refresh_metadata()
+        return scheduler_output
+
+    @torch.inference_mode()
+    def execute_verifier_replay_requests(
+        self,
+        *,
+        replay_requests: Sequence[dict[str, object]],
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        request_ids = [
+            cast(str, replay_request["request_id"])
+            for replay_request in replay_requests
+        ]
+        with self.synchronize_input_prep():
+            try:
+                scheduler_output = self._prepare_scheduler_output_for_execution(
+                    self._prepare_verifier_replay_batch(
+                        replay_requests=replay_requests,
+                    )
+                )
+                return self._execute_prepared_scheduler_output(
+                    scheduler_output,
+                    intermediate_tensors,
+                )
+            finally:
+                self._cleanup_verifier_replay_scratch_requests(request_ids)
+
+    def execute_verifier_replay_request(
+        self,
+        *,
+        request_id: str,
+        committed_token_ids: list[int],
+        draft_token_ids: list[int],
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        return self.execute_verifier_replay_requests(
+            replay_requests=[
+                {
+                    "request_id": request_id,
+                    "committed_token_ids": committed_token_ids,
+                    "draft_token_ids": draft_token_ids,
+                }
+            ],
+            intermediate_tensors=intermediate_tensors,
+        )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -3533,12 +3694,10 @@ class GPUModelRunner(
 
         return slot_mappings_by_gid, slot_mappings_by_layer
 
-    @torch.inference_mode()
-    def execute_model(
+    def _prepare_scheduler_output_for_execution(
         self,
-        scheduler_output: "SchedulerOutput",
-        intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        scheduler_output: SchedulerOutput,
+    ) -> SchedulerOutput:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3574,14 +3733,15 @@ class GPUModelRunner(
                 scheduler_output.preempted_req_ids
             )
 
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        with (
-            record_function_or_nullcontext("gpu_model_runner: preprocess"),
-            self.synchronize_input_prep(),
-        ):
-            # Update persistent batch states.
-            self._update_states(scheduler_output)
+        return scheduler_output
 
+    def _execute_prepared_scheduler_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        with record_function_or_nullcontext("gpu_model_runner: preprocess"):
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
@@ -3865,6 +4025,23 @@ class GPUModelRunner(
         )
         self.kv_connector_output = kv_connector_output
         return None
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        scheduler_output = self._prepare_scheduler_output_for_execution(
+            scheduler_output
+        )
+        with self.synchronize_input_prep():
+            # Update persistent batch states.
+            self._update_states(scheduler_output)
+            return self._execute_prepared_scheduler_output(
+                scheduler_output,
+                intermediate_tensors,
+            )
 
     @torch.inference_mode
     def sample_tokens(
@@ -6720,16 +6897,19 @@ class GPUModelRunner(
 
         return run_verifier_replay_forward(self, request)
 
-    def dssd_draft_round(self, request: Any) -> Any:
-        from vllm.v1.dssd.worker.draft_runner import DraftRoundResult
-
-        del request
-        return DraftRoundResult(
-            draft_token_ids=[1],
-            q_values=[0.75],
-            q_dists_handle="gpu:0",
-            q_distributions=[[0.25, 0.75]],
+    def dssd_close_verifier_session(self, request: Any) -> Any:
+        from vllm.v1.dssd.worker.verifier_runner import (
+            close_verifier_replay_session,
         )
+
+        return close_verifier_replay_session(self, request)
+
+    def dssd_draft_round(self, request: Any) -> Any:
+        from vllm.v1.dssd.worker.draft_runner import (
+            run_draft_replay_forward,
+        )
+
+        return run_draft_replay_forward(self, request)
 
 
 @dataclass

@@ -197,6 +197,44 @@ def test_dssd_serving_chat_delegates_generation_to_round_coordinator():
     )
 
 
+def test_dssd_serving_chat_delegates_streaming_generation_to_round_coordinator():
+    engine_client = SimpleNamespace(vllm_config=_DummyVllmConfig())
+    models = SimpleNamespace(model_name=lambda *_args, **_kwargs: "dummy-model")
+    serving = DSSDEdgeServingChat(
+        engine_client,
+        models,
+        "assistant",
+        openai_serving_render=SimpleNamespace(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+    )
+    request = SimpleNamespace(stream=True)
+    raw_request = SimpleNamespace()
+
+    async def _fake_stream():
+        yield "data: first\n\n"
+        yield "data: [DONE]\n\n"
+
+    stream = _fake_stream()
+    calls = []
+
+    def _create_chat_completion_stream(*, request, raw_request, serving):
+        calls.append((request, raw_request, serving))
+        return stream
+
+    serving.round_coordinator = SimpleNamespace(
+        create_chat_completion_stream=_create_chat_completion_stream,
+    )
+
+    import asyncio
+
+    result = asyncio.run(serving.create_chat_completion(request, raw_request))
+
+    assert result is stream
+    assert calls == [(request, raw_request, serving)]
+
+
 def test_init_generate_state_uses_dssd_serving_chat_for_edge_role():
     engine_client = SimpleNamespace(
         vllm_config=_DummyVllmConfig(role="edge"),

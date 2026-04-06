@@ -4,6 +4,7 @@
 import numpy as np
 import pytest
 import torch
+from contextlib import nullcontext
 
 from vllm.config import (
     AttentionConfig,
@@ -198,6 +199,129 @@ def _make_mock_backend_for_kernel_block_size(
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+
+
+def test_execute_verifier_replay_request_uses_batch_of_one_wrapper_and_preserves_batch_semantics():
+    runner = object.__new__(GPUModelRunner)
+    observed = {}
+
+    runner.synchronize_input_prep = lambda: nullcontext()
+    runner._prepare_verifier_replay_batch = (
+        lambda *, replay_requests: observed.setdefault(
+            "replay_requests", replay_requests
+        )
+    )
+    runner._prepare_scheduler_output_for_execution = lambda scheduler_output: scheduler_output
+    runner._cleanup_verifier_replay_scratch_requests = (
+        lambda request_ids: observed.setdefault("cleaned_request_ids", list(request_ids))
+    )
+    runner.execute_verifier_replay_requests = lambda **kwargs: (
+        GPUModelRunner.execute_verifier_replay_requests(runner, **kwargs)
+    )
+
+    def _execute_prepared_scheduler_output(scheduler_output, intermediate_tensors):
+        observed["scheduler_output"] = scheduler_output
+        observed["intermediate_tensors"] = intermediate_tensors
+        observed["inference_mode"] = torch.is_inference_mode_enabled()
+        observed["grad_enabled"] = torch.is_grad_enabled()
+        return "ok"
+
+    runner._execute_prepared_scheduler_output = _execute_prepared_scheduler_output
+
+    result = GPUModelRunner.execute_verifier_replay_request(
+        runner,
+        request_id="req-1",
+        committed_token_ids=[1, 2],
+        draft_token_ids=[3],
+    )
+
+    assert result == "ok"
+    assert observed["replay_requests"] == [
+        {
+            "request_id": "req-1",
+            "committed_token_ids": [1, 2],
+            "draft_token_ids": [3],
+        }
+    ]
+    assert observed["scheduler_output"] == observed["replay_requests"]
+    assert observed["intermediate_tensors"] is None
+    assert observed["inference_mode"] is True
+    assert observed["grad_enabled"] is False
+    assert observed["cleaned_request_ids"] == ["req-1"]
+
+
+def test_execute_verifier_replay_requests_runs_in_inference_mode_and_cleans_scratch():
+    runner = object.__new__(GPUModelRunner)
+    observed = {}
+
+    runner.synchronize_input_prep = lambda: nullcontext()
+    runner._prepare_verifier_replay_batch = lambda replay_requests: replay_requests
+    runner._prepare_scheduler_output_for_execution = lambda scheduler_output: scheduler_output
+    runner._cleanup_verifier_replay_scratch_requests = (
+        lambda request_ids: observed.setdefault("cleaned_request_ids", list(request_ids))
+    )
+
+    def _execute_prepared_scheduler_output(scheduler_output, intermediate_tensors):
+        observed["scheduler_output"] = scheduler_output
+        observed["intermediate_tensors"] = intermediate_tensors
+        observed["inference_mode"] = torch.is_inference_mode_enabled()
+        observed["grad_enabled"] = torch.is_grad_enabled()
+        return "ok-batch"
+
+    runner._execute_prepared_scheduler_output = _execute_prepared_scheduler_output
+
+    result = GPUModelRunner.execute_verifier_replay_requests(
+        runner,
+        replay_requests=[
+            {
+                "request_id": "req-1",
+                "committed_token_ids": [1, 2],
+                "draft_token_ids": [3],
+            },
+            {
+                "request_id": "req-2",
+                "committed_token_ids": [4],
+                "draft_token_ids": [5, 6],
+            },
+        ],
+    )
+
+    assert result == "ok-batch"
+    assert observed["scheduler_output"][0]["request_id"] == "req-1"
+    assert observed["scheduler_output"][1]["request_id"] == "req-2"
+    assert observed["intermediate_tensors"] is None
+    assert observed["inference_mode"] is True
+    assert observed["grad_enabled"] is False
+    assert observed["cleaned_request_ids"] == ["req-1", "req-2"]
+
+
+def test_execute_verifier_replay_request_wraps_batch_of_one():
+    runner = object.__new__(GPUModelRunner)
+    observed = {}
+
+    def _execute_verifier_replay_requests(*, replay_requests, intermediate_tensors=None):
+        observed["replay_requests"] = replay_requests
+        observed["intermediate_tensors"] = intermediate_tensors
+        return "wrapped"
+
+    runner.execute_verifier_replay_requests = _execute_verifier_replay_requests
+
+    result = GPUModelRunner.execute_verifier_replay_request(
+        runner,
+        request_id="req-1",
+        committed_token_ids=[1, 2],
+        draft_token_ids=[3],
+    )
+
+    assert result == "wrapped"
+    assert observed["replay_requests"] == [
+        {
+            "request_id": "req-1",
+            "committed_token_ids": [1, 2],
+            "draft_token_ids": [3],
+        }
+    ]
+    assert observed["intermediate_tensors"] is None
 
 
 def test_select_common_block_size_prefers_manager_block_size():

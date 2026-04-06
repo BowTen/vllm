@@ -63,6 +63,11 @@ class DSSDSessionRunner:
         state = self.verifier_sessions.get(request.verifier_session_id)
         if state is None:
             return False
+        if self.model_executor is not None:
+            self.model_executor.collective_rpc(
+                "dssd_close_verifier_session",
+                args=(request,),
+            )
         self.verifier_sessions.delete(request.verifier_session_id)
         return True
 
@@ -84,7 +89,13 @@ class DSSDSessionRunner:
                 "dssd_draft_round",
                 args=(request,),
             )
-            return result[0]
+            replies = [reply for reply in result if reply is not None]
+            if len(replies) != 1:
+                raise RuntimeError(
+                    "dssd_draft_round expected exactly one draft "
+                    "reply from the output rank"
+                )
+            return replies[0]
         return DraftRoundResult(
             draft_token_ids=[1] * request.gamma,
             q_values=[0.75] * request.gamma,
