@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from dataclasses import dataclass
@@ -597,6 +598,117 @@ async def test_dssd_smoke_exports_experiment_result_to_raw_request_state(
             "jitter_ms": 0.0,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_dssd_smoke_exports_experiment_result_to_sink_file(
+    smoke_modules,
+    tmp_path: Path,
+):
+    class _StubVerifierEngine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+
+        async def dssd_verify_round_async(self, request):
+            return smoke_modules.VerifyRoundResponse(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                accepted_count=1,
+                all_accepted=True,
+                bonus_token_id=9,
+                finished=True,
+                finish_reason="stop",
+            )
+
+    class _StubEdgeEngine:
+        async def dssd_draft_round_async(self, request):
+            del request
+            return SimpleNamespace(
+                draft_token_ids=[3],
+                q_values=[0.7],
+                q_dists_handle="edge-1:0",
+                q_distributions=[[0.3, 0.7]],
+            )
+
+    class _Tokenizer:
+        def decode(self, token_ids, skip_special_tokens=False):
+            del skip_special_tokens
+            return "|".join(f"tok{token_id}" for token_id in token_ids)
+
+    class _StubServing:
+        def __init__(self) -> None:
+            self.models = SimpleNamespace(
+                model_name=lambda *_args, **_kwargs: "edge-model"
+            )
+            self.renderer = SimpleNamespace(
+                get_tokenizer=lambda: _Tokenizer(),
+                tokenizer=_Tokenizer(),
+            )
+            self.default_sampling_params = {
+                "temperature": 0.6,
+                "top_p": 0.75,
+                "top_k": 11,
+                "min_p": 0.03,
+                "max_tokens": 16,
+            }
+            self.model_config = SimpleNamespace(max_model_len=128)
+            self.override_max_tokens = None
+
+        async def render_chat_request(self, request):
+            del request
+            return [], [{"prompt_token_ids": [11, 12]}]
+
+        def create_error_response(self, message: str, **kwargs):
+            return {"message": message, **kwargs}
+
+    app = FastAPI()
+    app.state.dssd_verifier_service = smoke_modules.DSSDVerifierService(
+        _StubVerifierEngine(),
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=1),
+        ),
+    )
+    smoke_modules.attach_router(app)
+
+    transport = smoke_modules.HTTPDSSDTransport(
+        base_url="http://testserver",
+        network_simulation=SimpleNamespace(
+            latency_ms=0.0,
+            bandwidth_mbps=None,
+            jitter_ms=0.0,
+        ),
+        client=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ),
+    )
+    sink_path = tmp_path / "dssd-results.jsonl"
+    try:
+        coordinator = smoke_modules.DSSDRoundCoordinator(
+            edge_engine=_StubEdgeEngine(),
+            transport=transport,
+            gamma=1,
+            experiment_result_path=str(sink_path),
+        )
+        await coordinator.create_chat_completion(
+            request=_attach_sampling_params(SimpleNamespace(
+                stream=False,
+                max_tokens=4,
+                stop_token_ids=[],
+                user="edge-user",
+            )),
+            raw_request=SimpleNamespace(state=SimpleNamespace()),
+            serving=_StubServing(),
+        )
+    finally:
+        await transport.aclose()
+
+    assert sink_path.exists()
+    lines = sink_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    exported = json.loads(lines[0])
+    assert exported["request"]["accepted_tokens"] == 1
+    assert exported["run"]["mode"] == "dssd"
 
 
 @pytest.mark.asyncio

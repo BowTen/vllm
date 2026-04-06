@@ -32,6 +32,8 @@ class DSSDConfig:
     """Experiment mode for edge runs, either `dssd` or `baseline`."""
     verifier_url: str | None = None
     """Verifier endpoint URL required for edge mode."""
+    experiment_result_path: str | None = None
+    """Optional JSONL sink path for completed experiment results."""
     network_simulation: DSSDNetworkSimulationConfig = field(
         default_factory=DSSDNetworkSimulationConfig
     )

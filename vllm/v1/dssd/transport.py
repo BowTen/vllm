@@ -80,7 +80,10 @@ class HTTPDSSDTransport(SimulatedNetworkMixin, DSSDTransport):
     ) -> None:
         super().__init__(network_simulation=network_simulation)
         self.base_url = base_url.rstrip("/")
-        self._client = client or httpx.AsyncClient(base_url=self.base_url)
+        self._client = client or httpx.AsyncClient(
+            base_url=self.base_url,
+            trust_env=False,
+        )
         self._owns_client = client is None
 
     async def aclose(self) -> None:

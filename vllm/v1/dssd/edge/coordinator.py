@@ -26,6 +26,7 @@ from vllm.v1.dssd.protocol import (
     VerifyRoundRequest,
     VerifyRoundResponse,
 )
+from vllm.v1.dssd.result_sink import append_experiment_result
 from vllm.v1.dssd.edge.session import DSSDEdgeSessionState
 from vllm.v1.dssd.tokenizer_utils import compute_tokenizer_fingerprints
 from vllm.v1.dssd.worker.resample import select_residual_token
@@ -60,10 +61,18 @@ class VerifiedRoundDelta:
 
 
 class DSSDRoundCoordinator:
-    def __init__(self, edge_engine, transport, *, gamma: int = 1) -> None:
+    def __init__(
+        self,
+        edge_engine,
+        transport,
+        *,
+        gamma: int = 1,
+        experiment_result_path: str | None = None,
+    ) -> None:
         self.edge_engine = edge_engine
         self.transport = transport
         self.gamma = gamma
+        self.experiment_result_path = experiment_result_path
         self._binding: BindVerifierResponse | None = None
 
     async def create_chat_completion(
@@ -615,16 +624,14 @@ class DSSDRoundCoordinator:
         metrics: DSSDRequestMetrics,
         run_metadata: dict[str, object],
     ) -> None:
+        payload = metrics.export(run_metadata=run_metadata)
         if raw_request is None:
+            append_experiment_result(self.experiment_result_path, payload)
             return
         state = getattr(raw_request, "state", None)
-        if state is None:
-            return
-        setattr(
-            state,
-            "dssd_experiment_result",
-            metrics.export(run_metadata=run_metadata),
-        )
+        if state is not None:
+            setattr(state, "dssd_experiment_result", payload)
+        append_experiment_result(self.experiment_result_path, payload)
 
     def _build_run_metadata(
         self,

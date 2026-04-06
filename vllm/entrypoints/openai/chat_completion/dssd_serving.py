@@ -25,6 +25,11 @@ class DSSDEdgeServingChat(OpenAIServingChat):
             edge_engine=self.engine_client,
             transport=transport,
             gamma=gamma,
+            experiment_result_path=(
+                getattr(dssd_config, "experiment_result_path", None)
+                if dssd_config is not None
+                else None
+            ),
         )
 
     async def create_chat_completion(self, request, raw_request=None):

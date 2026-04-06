@@ -42,7 +42,8 @@ The repository baseline already includes the core DSSD pipeline:
   end-to-end edge serving, round coordination, streaming, finish handling, and session cleanup exist.
 - Phase 5 complete:
   experiment-grade observability, verifier-side batching, and baseline
-  comparison workflow now exist alongside transport simulation.
+  comparison workflow now exist alongside transport simulation and the local
+  experiment harness.
 
 ## Baseline Capabilities
 
@@ -56,6 +57,7 @@ Expected capability areas include:
 - Experiment transport simulation and experiment observability
 - Verifier round batching
 - Experiment baseline comparison workflow
+- Local experiment harness and offline analysis artifacts
 
 ## Out of Scope for the Baseline
 

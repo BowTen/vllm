@@ -81,6 +81,22 @@ def test_dssd_config_accepts_baseline_mode_without_verifier_url(
     assert cfg.verifier_url is None
 
 
+def test_dssd_config_accepts_experiment_result_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dssd_mod = _load_dssd_module(monkeypatch)
+
+    cfg = dssd_mod.DSSDConfig(
+        enabled=True,
+        role="edge",
+        gamma=4,
+        verifier_url="http://127.0.0.1:9000",
+        experiment_result_path="/tmp/dssd-results.jsonl",
+    ).validate()
+
+    assert cfg.experiment_result_path == "/tmp/dssd-results.jsonl"
+
+
 def test_dssd_config_disabled_short_circuits_validation(
     monkeypatch: pytest.MonkeyPatch,
 ):
