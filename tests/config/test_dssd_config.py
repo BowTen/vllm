@@ -65,6 +65,22 @@ def test_dssd_config_accepts_valid_edge_config(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(cfg.network_simulation, dssd_mod.DSSDNetworkSimulationConfig)
 
 
+def test_dssd_config_accepts_baseline_mode_without_verifier_url(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dssd_mod = _load_dssd_module(monkeypatch)
+
+    cfg = dssd_mod.DSSDConfig(
+        enabled=True,
+        role="edge",
+        gamma=4,
+        experiment_mode="baseline",
+    ).validate()
+
+    assert cfg.experiment_mode == "baseline"
+    assert cfg.verifier_url is None
+
+
 def test_dssd_config_disabled_short_circuits_validation(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -87,6 +103,20 @@ def test_dssd_config_rejects_gamma_below_one(monkeypatch: pytest.MonkeyPatch):
 
     with pytest.raises(ValueError, match="gamma"):
         dssd_mod.DSSDConfig(enabled=True, role="verifier", gamma=0).validate()
+
+
+def test_dssd_config_rejects_invalid_experiment_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dssd_mod = _load_dssd_module(monkeypatch)
+
+    with pytest.raises(ValueError, match="experiment_mode"):
+        dssd_mod.DSSDConfig(
+            enabled=True,
+            role="edge",
+            gamma=4,
+            experiment_mode="mystery",
+        ).validate()
 
 
 def test_dssd_config_rejects_edge_without_verifier_url(

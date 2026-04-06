@@ -407,6 +407,72 @@ def test_session_runner_verify_round_allows_empty_prompt_on_first_round():
     assert called_request.committed_token_ids == []
 
 
+def test_session_runner_uses_collective_rpc_for_verify_round_batch():
+    expected_a = VerifierForwardResult(
+        verifier_session_id="vs-batch-a",
+        seq_no=0,
+        seq_probs=[[0.1, 0.9]],
+        bonus_probs=[0.3, 0.7],
+        finish_reason="gpu-replay-forward",
+    )
+    expected_b = VerifierForwardResult(
+        verifier_session_id="vs-batch-b",
+        seq_no=0,
+        seq_probs=[[0.2, 0.8], [0.4, 0.6]],
+        bonus_probs=[0.5, 0.5],
+        finish_reason="gpu-replay-forward",
+    )
+    model_executor = types.SimpleNamespace(
+        collective_rpc=Mock(return_value=[[expected_a, expected_b]]),
+    )
+    runner = DSSDSessionRunner(model_executor=model_executor)
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-batch-a",
+            binding_id="bind-1",
+            prompt_token_ids=[1, 2],
+            sampling_params_digest="sp-shared",
+        )
+    )
+    runner.create_verifier_session(
+        VerifierSessionInitRequest(
+            verifier_session_id="vs-batch-b",
+            binding_id="bind-2",
+            prompt_token_ids=[3],
+            sampling_params_digest="sp-shared",
+        )
+    )
+
+    results = runner.dssd_verify_round_batch([
+        VerifyRoundRequest(
+            binding_id="bind-1",
+            verifier_session_id="vs-batch-a",
+            seq_no=0,
+            prefix_delta_token_ids=[4],
+            draft_token_ids=[7],
+            q_values=[0.6],
+        ),
+        VerifyRoundRequest(
+            binding_id="bind-2",
+            verifier_session_id="vs-batch-b",
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[8, 9],
+            q_values=[0.4, 0.5],
+        ),
+    ])
+
+    assert results == [expected_a, expected_b]
+    model_executor.collective_rpc.assert_called_once()
+    called_requests = model_executor.collective_rpc.call_args.kwargs["args"][0]
+    assert [request.verifier_session_id for request in called_requests] == [
+        "vs-batch-a",
+        "vs-batch-b",
+    ]
+    assert called_requests[0].committed_token_ids == [1, 2, 4]
+    assert called_requests[1].committed_token_ids == [3]
+
+
 def test_session_runner_verify_round_rejects_multiple_collective_replies():
     reply_a = VerifierForwardResult(
         verifier_session_id="vs-pp",

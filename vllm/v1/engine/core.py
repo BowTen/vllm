@@ -304,6 +304,11 @@ class EngineCore:
     ) -> VerifierForwardResult:
         return self.dssd_session_runner.dssd_verify_round(request)
 
+    def dssd_verify_round_batch(
+        self, requests: list[VerifyRoundRequest]
+    ) -> list[VerifierForwardResult]:
+        return self.dssd_session_runner.dssd_verify_round_batch(requests)
+
     def dssd_create_verifier_session(
         self, request: VerifierSessionInitRequest
     ) -> bool:

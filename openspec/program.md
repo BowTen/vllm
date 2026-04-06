@@ -40,8 +40,9 @@ The repository baseline already includes the core DSSD pipeline:
   edge draft execution, reject-side residual resampling, and committed-prefix updates exist.
 - Phase 4 complete:
   end-to-end edge serving, round coordination, streaming, finish handling, and session cleanup exist.
-- Phase 5 is only partially complete:
-  basic batching scaffolding, transport simulation, and minimal metrics exist, but experiment-grade metrics and full experiment-readiness are not yet complete.
+- Phase 5 complete:
+  experiment-grade observability, verifier-side batching, and baseline
+  comparison workflow now exist alongside transport simulation.
 
 ## Baseline Capabilities
 
@@ -52,7 +53,9 @@ Expected capability areas include:
 - Verifier control-plane protocol and session lifecycle
 - Verifier replay and accept/reject semantics
 - Edge draft, resampling, and commit flow
-- Experiment transport simulation and minimal request metrics
+- Experiment transport simulation and experiment observability
+- Verifier round batching
+- Experiment baseline comparison workflow
 
 ## Out of Scope for the Baseline
 
@@ -78,7 +81,8 @@ The baseline does not aim to fully support:
 - `openspec/specs/` records behaviors the repository already commits to support.
 - `openspec/changes/` records active deltas from that baseline.
 - Historical implementation phases should be translated into capability specs rather than copied verbatim.
-- Unfinished work, starting with Phase 5 experiment support, should be advanced through new OpenSpec changes.
+- New work beyond the five-phase baseline should be advanced through new
+  OpenSpec changes.
 
 ## Reference Documents
 

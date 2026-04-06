@@ -7,14 +7,16 @@ import hashlib
 import json
 import time
 from contextlib import suppress
-from http import HTTPStatus
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import uuid4
 
+import msgspec
 import torch
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.dssd.metrics import DSSDRequestMetrics
 from vllm.v1.dssd.protocol import (
     BindVerifierRequest,
     BindVerifierResponse,
@@ -45,6 +47,7 @@ class _PreparedChatCompletion:
     prompt_token_ids: list[int]
     resolved_sampling_params: SamplingParams
     binding: BindVerifierResponse
+    metrics: DSSDRequestMetrics
 
 
 @dataclass
@@ -86,6 +89,7 @@ class DSSDRoundCoordinator:
         if self._is_error_response(prepared):
             return prepared
 
+        request_started_at = time.perf_counter()
         try:
             committed_token_ids, finish_reason = (
                 await self._collect_verified_completion(
@@ -96,12 +100,27 @@ class DSSDRoundCoordinator:
                     resolved_sampling_params=prepared.resolved_sampling_params,
                     request_id=prepared.request_id,
                     binding=prepared.binding,
+                    metrics=prepared.metrics,
                 )
             )
         except ValueError as exc:
             return serving.create_error_response(
                 str(exc),
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            prepared.metrics.finalize_request(
+                total_latency_ms=(time.perf_counter() - request_started_at) * 1000.0
+            )
+            self._publish_experiment_result(
+                raw_request=raw_request,
+                metrics=prepared.metrics,
+                run_metadata=self._build_run_metadata(
+                    serving=serving,
+                    binding=prepared.binding,
+                    resolved_sampling_params=prepared.resolved_sampling_params,
+                    mode="dssd",
+                ),
             )
 
         return self._build_chat_response(
@@ -173,8 +192,9 @@ class DSSDRoundCoordinator:
             )
 
         request_id = self._request_id(request, raw_request)
+        metrics = DSSDRequestMetrics(request_id=request_id)
         try:
-            binding = await self._ensure_binding(request)
+            binding = await self._ensure_binding(request, metrics=metrics)
         except ValueError as exc:
             return serving.create_error_response(
                 f"DSSD verifier binding rejected: {exc}",
@@ -185,6 +205,7 @@ class DSSDRoundCoordinator:
             prompt_token_ids=prompt_token_ids,
             resolved_sampling_params=resolved_sampling_params,
             binding=binding,
+            metrics=metrics,
         )
 
     async def _collect_verified_completion(
@@ -197,6 +218,7 @@ class DSSDRoundCoordinator:
         resolved_sampling_params: SamplingParams,
         request_id: str,
         binding: BindVerifierResponse,
+        metrics: DSSDRequestMetrics,
     ) -> tuple[list[int], str]:
         committed_token_ids: list[int] = []
         finish_reason = "length"
@@ -208,6 +230,7 @@ class DSSDRoundCoordinator:
             resolved_sampling_params=resolved_sampling_params,
             request_id=request_id,
             binding=binding,
+            metrics=metrics,
         ):
             committed_token_ids.extend(delta.delta_token_ids)
             if delta.finished:
@@ -225,17 +248,21 @@ class DSSDRoundCoordinator:
         resolved_sampling_params: SamplingParams,
         request_id: str,
         binding: BindVerifierResponse,
+        metrics: DSSDRequestMetrics,
     ) -> AsyncIterator[VerifiedRoundDelta]:
         tokenizer = self._get_tokenizer(serving)
-        session_response = await self.transport.create_session(
-            CreateSessionRequest(
-                binding_id=binding.binding_id,
-                request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
-                sampling_params_digest=self._sampling_params_digest(request),
-                max_new_tokens=self._max_new_tokens(request),
-                stop_token_ids=list(getattr(request, "stop_token_ids", []) or []),
-            )
+        create_session_request = CreateSessionRequest(
+            binding_id=binding.binding_id,
+            request_id=request_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params_digest=self._sampling_params_digest(request),
+            max_new_tokens=self._max_new_tokens(request),
+            stop_token_ids=list(getattr(request, "stop_token_ids", []) or []),
+        )
+        session_response = await self._call_transport(
+            method=self.transport.create_session,
+            request=create_session_request,
+            metrics=metrics,
         )
         session_state = DSSDEdgeSessionState(
             request_id=request_id,
@@ -247,6 +274,8 @@ class DSSDRoundCoordinator:
         visible_token_ids: list[int] = []
         try:
             while True:
+                round_started_at = time.perf_counter()
+                draft_started_at = round_started_at
                 draft_result = await self.edge_engine.dssd_draft_round_async(
                     DraftRoundRequest(
                         local_session_id=session_state.local_session_id,
@@ -257,18 +286,27 @@ class DSSDRoundCoordinator:
                         sampling_params=resolved_sampling_params,
                     )
                 )
-                verify_response = await self.transport.verify_round(
-                    VerifyRoundRequest(
-                        binding_id=session_state.verifier_binding_id,
-                        verifier_session_id=session_state.verifier_session_id,
-                        seq_no=session_state.seq_no,
-                        prefix_delta_token_ids=list(
-                            session_state.pending_prefix_delta_token_ids
-                        ),
-                        draft_token_ids=list(draft_result.draft_token_ids),
-                        q_values=list(draft_result.q_values),
-                    )
+                draft_latency_ms = (time.perf_counter() - draft_started_at) * 1000.0
+                verify_request = VerifyRoundRequest(
+                    binding_id=session_state.verifier_binding_id,
+                    verifier_session_id=session_state.verifier_session_id,
+                    seq_no=session_state.seq_no,
+                    prefix_delta_token_ids=list(
+                        session_state.pending_prefix_delta_token_ids
+                    ),
+                    draft_token_ids=list(draft_result.draft_token_ids),
+                    q_values=list(draft_result.q_values),
                 )
+                verify_started_at = time.perf_counter()
+                verify_response = await self._call_transport(
+                    method=self.transport.verify_round,
+                    request=verify_request,
+                    metrics=metrics,
+                )
+                verify_latency_ms = (time.perf_counter() - verify_started_at) * 1000.0
+                round_trip_latency_ms = (
+                    time.perf_counter() - round_started_at
+                ) * 1000.0
                 session_state.pending_prefix_delta_token_ids.clear()
                 if verify_response.seq_no != session_state.seq_no:
                     raise ValueError(
@@ -311,6 +349,14 @@ class DSSDRoundCoordinator:
                 )
                 delta_token_ids = committed_token_ids[len(visible_token_ids) :]
                 visible_token_ids = committed_token_ids
+                metrics.record_round(
+                    seq_no=session_state.seq_no,
+                    accepted_count=verify_response.accepted_count,
+                    reject_index=verify_response.reject_index,
+                    draft_latency_ms=draft_latency_ms,
+                    verify_latency_ms=verify_latency_ms,
+                    round_trip_latency_ms=round_trip_latency_ms,
+                )
                 yield VerifiedRoundDelta(
                     seq_no=session_state.seq_no,
                     delta_token_ids=delta_token_ids,
@@ -328,11 +374,13 @@ class DSSDRoundCoordinator:
                 session_state.seq_no += 1
         finally:
             with suppress(Exception):
-                await self.transport.close_session(
-                    CloseSessionRequest(
+                await self._call_transport(
+                    method=self.transport.close_session,
+                    request=CloseSessionRequest(
                         verifier_session_id=session_response.verifier_session_id,
                         reason="edge_request_finished",
-                    )
+                    ),
+                    metrics=metrics,
                 )
 
     async def _create_chat_completion_stream_generator(
@@ -365,6 +413,7 @@ class DSSDRoundCoordinator:
             getattr(request, "stream_options", None),
             getattr(serving, "enable_force_include_usage", False),
         )
+        request_started_at = time.perf_counter()
         try:
             first_choice = ChatCompletionResponseStreamChoice(
                 index=0,
@@ -394,6 +443,7 @@ class DSSDRoundCoordinator:
                 resolved_sampling_params=prepared.resolved_sampling_params,
                 request_id=prepared.request_id,
                 binding=prepared.binding,
+                metrics=prepared.metrics,
             ):
                 committed_token_ids.extend(delta.delta_token_ids)
                 if delta.delta_token_ids or delta.delta_text:
@@ -458,6 +508,20 @@ class DSSDRoundCoordinator:
                 "data: "
                 f"{self._create_streaming_error_response(serving, exc, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)}\n\n"
             )
+        finally:
+            prepared.metrics.finalize_request(
+                total_latency_ms=(time.perf_counter() - request_started_at) * 1000.0
+            )
+            self._publish_experiment_result(
+                raw_request=raw_request,
+                metrics=prepared.metrics,
+                run_metadata=self._build_run_metadata(
+                    serving=serving,
+                    binding=prepared.binding,
+                    resolved_sampling_params=prepared.resolved_sampling_params,
+                    mode="dssd",
+                ),
+            )
         yield "data: [DONE]\n\n"
 
     @staticmethod
@@ -496,7 +560,10 @@ class DSSDRoundCoordinator:
         )
 
     async def _ensure_binding(
-        self, request: "ChatCompletionRequest"
+        self,
+        request: "ChatCompletionRequest",
+        *,
+        metrics: DSSDRequestMetrics | None = None,
     ) -> BindVerifierResponse:
         if self._binding is not None:
             return self._binding
@@ -508,7 +575,11 @@ class DSSDRoundCoordinator:
             vocab_hash=self._vocab_hash(),
             supported_gamma_max=self.gamma,
         )
-        binding = await self.transport.bind_verifier(bind_request)
+        binding = await self._call_transport(
+            method=self.transport.bind_verifier,
+            request=bind_request,
+            metrics=metrics,
+        )
         if binding.protocol_version != bind_request.protocol_version:
             raise ValueError("verifier protocol_version mismatch")
         if binding.tokenizer_hash != bind_request.tokenizer_hash:
@@ -519,6 +590,77 @@ class DSSDRoundCoordinator:
             raise ValueError("verifier supported_gamma_max is smaller than edge gamma")
         self._binding = binding
         return self._binding
+
+    async def _call_transport(
+        self,
+        *,
+        method,
+        request,
+        metrics: DSSDRequestMetrics | None,
+    ):
+        if metrics is not None:
+            metrics.record_uplink(self._serialized_size(request))
+        response = await method(request)
+        if metrics is not None:
+            metrics.record_downlink(self._serialized_size(response))
+        return response
+
+    def _serialized_size(self, value: Any) -> int:
+        return len(msgspec.json.encode(msgspec.to_builtins(value)))
+
+    def _publish_experiment_result(
+        self,
+        *,
+        raw_request: "Request | None",
+        metrics: DSSDRequestMetrics,
+        run_metadata: dict[str, object],
+    ) -> None:
+        if raw_request is None:
+            return
+        state = getattr(raw_request, "state", None)
+        if state is None:
+            return
+        setattr(
+            state,
+            "dssd_experiment_result",
+            metrics.export(run_metadata=run_metadata),
+        )
+
+    def _build_run_metadata(
+        self,
+        *,
+        serving: "OpenAIServingChat",
+        binding: BindVerifierResponse,
+        resolved_sampling_params: SamplingParams,
+        mode: str,
+    ) -> dict[str, object]:
+        return {
+            "mode": mode,
+            "edge_model_id": self._model_name(serving),
+            "verifier_model_id": binding.verifier_model_id,
+            "sampling": {
+                "temperature": resolved_sampling_params.temperature,
+                "top_p": resolved_sampling_params.top_p,
+                "top_k": resolved_sampling_params.top_k,
+                "min_p": resolved_sampling_params.min_p,
+                "max_tokens": resolved_sampling_params.max_tokens,
+            },
+            "network": self._network_metadata(),
+        }
+
+    def _network_metadata(self) -> dict[str, float | None]:
+        network_simulation = getattr(self.transport, "network_simulation", None)
+        if network_simulation is None:
+            return {
+                "latency_ms": None,
+                "bandwidth_mbps": None,
+                "jitter_ms": None,
+            }
+        return {
+            "latency_ms": getattr(network_simulation, "latency_ms", None),
+            "bandwidth_mbps": getattr(network_simulation, "bandwidth_mbps", None),
+            "jitter_ms": getattr(network_simulation, "jitter_ms", None),
+        }
 
     def _build_committed_tokens(
         self,

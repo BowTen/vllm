@@ -42,13 +42,15 @@ def register_generate_api_routers(app: FastAPI):
     register_anthropic_api_router(app)
 
 
-def _is_dssd_edge_mode(vllm_config: object) -> bool:
+def _dssd_experiment_mode(vllm_config: object) -> str | None:
     dssd_config = getattr(vllm_config, "dssd_config", None)
-    return bool(
+    if not (
         dssd_config is not None
         and getattr(dssd_config, "enabled", False)
         and getattr(dssd_config, "role", None) == "edge"
-    )
+    ):
+        return None
+    return getattr(dssd_config, "experiment_mode", "dssd")
 
 
 async def init_generate_state(
@@ -125,12 +127,19 @@ async def init_generate_state(
     )
     vllm_config = engine_client.vllm_config
     openai_serving_chat_cls = OpenAIServingChat
-    if _is_dssd_edge_mode(vllm_config):
+    experiment_mode = _dssd_experiment_mode(vllm_config)
+    if experiment_mode == "dssd":
         from vllm.entrypoints.openai.chat_completion.dssd_serving import (
             DSSDEdgeServingChat,
         )
 
         openai_serving_chat_cls = DSSDEdgeServingChat
+    elif experiment_mode == "baseline":
+        from vllm.entrypoints.openai.chat_completion.dssd_serving import (
+            DSSDExperimentBaselineServingChat,
+        )
+
+        openai_serving_chat_cls = DSSDExperimentBaselineServingChat
 
     state.openai_serving_chat = (
         openai_serving_chat_cls(

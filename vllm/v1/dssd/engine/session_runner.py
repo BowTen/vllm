@@ -106,40 +106,54 @@ class DSSDSessionRunner:
     def dssd_verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
-        execution_request = self._build_verifier_execution_request(request)
+        return self.dssd_verify_round_batch([request])[0]
+
+    def dssd_verify_round_batch(
+        self, requests: list[VerifyRoundRequest]
+    ) -> list[VerifierForwardResult]:
+        execution_requests = [
+            self._build_verifier_execution_request(request) for request in requests
+        ]
         if self.model_executor is not None:
             result = self.model_executor.collective_rpc(
-                "dssd_verify_round",
-                args=(execution_request,),
+                "dssd_verify_round_batch",
+                args=(execution_requests,),
             )
             replies = [reply for reply in result if reply is not None]
             if len(replies) != 1:
                 raise RuntimeError(
-                    "dssd_verify_round expected exactly one verifier "
+                    "dssd_verify_round_batch expected exactly one verifier "
                     "reply from the output rank"
                 )
-            response = replies[0]
+            responses = replies[0]
         else:
-            vocab_size = max(execution_request.draft_token_ids, default=0) + 1
-            vocab_size = max(vocab_size, 1)
-            target_probs = []
-            for token_id in execution_request.draft_token_ids:
-                probs = [0.0] * vocab_size
-                probs[token_id] = 1.0
-                target_probs.append(probs)
-            bonus_probs = [0.0] * vocab_size
-            bonus_probs[0] = 1.0
-            target_probs.append(bonus_probs)
-            response = build_verifier_result(
-                request=execution_request,
-                target_probs=target_probs,
-                finish_reason="placeholder-forward",
-            )
+            responses = []
+            for execution_request in execution_requests:
+                vocab_size = max(execution_request.draft_token_ids, default=0) + 1
+                vocab_size = max(vocab_size, 1)
+                target_probs = []
+                for token_id in execution_request.draft_token_ids:
+                    probs = [0.0] * vocab_size
+                    probs[token_id] = 1.0
+                    target_probs.append(probs)
+                bonus_probs = [0.0] * vocab_size
+                bonus_probs[0] = 1.0
+                target_probs.append(bonus_probs)
+                responses.append(
+                    build_verifier_result(
+                        request=execution_request,
+                        target_probs=target_probs,
+                        finish_reason="placeholder-forward",
+                    )
+                )
 
-        session_state = self.verifier_sessions.get(request.verifier_session_id)
-        if session_state is not None and request.prefix_delta_token_ids:
-            session_state.committed_token_ids.extend(request.prefix_delta_token_ids)
-        return response
+        for request in requests:
+            session_state = self.verifier_sessions.get(request.verifier_session_id)
+            if session_state is not None and request.prefix_delta_token_ids:
+                session_state.committed_token_ids.extend(
+                    request.prefix_delta_token_ids
+                )
+        return list(responses)
 
     def _build_verifier_execution_request(
         self, request: VerifyRoundRequest

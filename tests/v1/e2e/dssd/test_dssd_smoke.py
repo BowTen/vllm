@@ -97,6 +97,7 @@ def _smoke_modules() -> Iterator[SimpleNamespace]:
         _install_package_stub("vllm", VLLM_DIR)
         _install_package_stub("vllm.v1", VLLM_DIR / "v1")
         _install_package_stub("vllm.v1.dssd", DSSD_DIR)
+        _install_package_stub("vllm.v1.dssd.engine", DSSD_DIR / "engine")
         _install_package_stub("vllm.v1.dssd.edge", DSSD_EDGE_DIR)
         _install_package_stub("vllm.v1.dssd.verifier", DSSD_VERIFIER_DIR)
         _install_package_stub("vllm.entrypoints", VLLM_DIR / "entrypoints")
@@ -179,6 +180,10 @@ def _smoke_modules() -> Iterator[SimpleNamespace]:
             "vllm.v1.dssd.protocol",
             DSSD_DIR / "protocol.py",
         )
+        _load_module(
+            "vllm.v1.dssd.engine.batch_planner",
+            DSSD_DIR / "engine" / "batch_planner.py",
+        )
         metrics_module = _load_module(
             "vllm.v1.dssd.metrics",
             DSSD_DIR / "metrics.py",
@@ -240,6 +245,72 @@ def test_metrics_track_communication_bytes(smoke_modules):
 
     assert metrics.uplink_bytes == 32
     assert metrics.downlink_bytes == 128
+
+
+def test_metrics_export_request_and_round_summaries(smoke_modules):
+    metrics = smoke_modules.DSSDRequestMetrics(request_id="req-metrics")
+
+    metrics.record_uplink(32)
+    metrics.record_downlink(128)
+    metrics.record_round(
+        seq_no=0,
+        accepted_count=2,
+        draft_latency_ms=1.5,
+        verify_latency_ms=2.5,
+        round_trip_latency_ms=4.0,
+    )
+    metrics.record_round(
+        seq_no=1,
+        accepted_count=1,
+        reject_index=1,
+        draft_latency_ms=1.0,
+        verify_latency_ms=3.0,
+        round_trip_latency_ms=4.5,
+    )
+    metrics.finalize_request(total_latency_ms=12.0)
+
+    exported = metrics.export(
+        run_metadata={
+            "mode": "dssd",
+            "edge_model_id": "edge-model",
+            "verifier_model_id": "target-model",
+        }
+    )
+
+    assert exported["request"]["request_id"] == "req-metrics"
+    assert exported["request"]["uplink_bytes"] == 32
+    assert exported["request"]["downlink_bytes"] == 128
+    assert exported["request"]["accepted_tokens"] == 3
+    assert exported["request"]["rejected_rounds"] == 1
+    assert exported["request"]["latency_ms"] == {
+        "total": 12.0,
+        "draft_total": 2.5,
+        "verify_total": 5.5,
+        "round_trip_total": 8.5,
+    }
+    assert exported["rounds"] == [
+        {
+            "seq_no": 0,
+            "accepted_count": 2,
+            "reject_index": None,
+            "draft_latency_ms": 1.5,
+            "verify_latency_ms": 2.5,
+            "round_trip_latency_ms": 4.0,
+        },
+        {
+            "seq_no": 1,
+            "accepted_count": 1,
+            "reject_index": 1,
+            "draft_latency_ms": 1.0,
+            "verify_latency_ms": 3.0,
+            "round_trip_latency_ms": 4.5,
+        },
+    ]
+    assert exported["run"] == {
+        "mode": "dssd",
+        "edge_model_id": "edge-model",
+        "verifier_model_id": "target-model",
+    }
 
 
 @pytest.mark.asyncio
@@ -374,6 +445,158 @@ async def test_dssd_smoke_runs_two_http_round_trips(smoke_modules):
     assert response.usage.prompt_tokens == 2
     assert response.usage.completion_tokens == 4
     assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_dssd_smoke_exports_experiment_result_to_raw_request_state(
+    smoke_modules,
+):
+    class _StubVerifierEngine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+
+        async def dssd_verify_round_async(self, request):
+            if request.seq_no == 0:
+                return smoke_modules.VerifyRoundResponse(
+                    verifier_session_id=request.verifier_session_id,
+                    seq_no=request.seq_no,
+                    accepted_count=1,
+                    all_accepted=True,
+                    bonus_token_id=9,
+                    finished=False,
+                )
+            return smoke_modules.VerifyRoundResponse(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                accepted_count=1,
+                all_accepted=False,
+                reject_index=0,
+                reject_target_probs=[0.8, 0.2],
+                finished=True,
+                finish_reason="stop",
+            )
+
+    class _StubEdgeEngine:
+        async def dssd_draft_round_async(self, request):
+            if request.seq_no == 0:
+                return SimpleNamespace(
+                    draft_token_ids=[3],
+                    q_values=[0.7],
+                    q_dists_handle="edge-1:0",
+                    q_distributions=[[0.3, 0.7]],
+                )
+            return SimpleNamespace(
+                draft_token_ids=[4],
+                q_values=[0.6],
+                q_dists_handle="edge-1:1",
+                q_distributions=[[0.4, 0.6]],
+            )
+
+    class _Coordinator(smoke_modules.DSSDRoundCoordinator):
+        def _resample_reject_token(self, *, verify_response, q_distributions):
+            del verify_response, q_distributions
+            return 42
+
+    class _Tokenizer:
+        def decode(self, token_ids, skip_special_tokens=False):
+            del skip_special_tokens
+            return "|".join(f"tok{token_id}" for token_id in token_ids)
+
+    class _StubServing:
+        def __init__(self) -> None:
+            self.models = SimpleNamespace(
+                model_name=lambda *_args, **_kwargs: "edge-model"
+            )
+            self.renderer = SimpleNamespace(
+                get_tokenizer=lambda: _Tokenizer(),
+                tokenizer=_Tokenizer(),
+            )
+            self.default_sampling_params = {
+                "temperature": 0.6,
+                "top_p": 0.75,
+                "top_k": 11,
+                "min_p": 0.03,
+                "max_tokens": 16,
+            }
+            self.model_config = SimpleNamespace(max_model_len=128)
+            self.override_max_tokens = None
+
+        async def render_chat_request(self, request):
+            del request
+            return [], [{"prompt_token_ids": [11, 12]}]
+
+        def create_error_response(self, message: str, **kwargs):
+            return {"message": message, **kwargs}
+
+    app = FastAPI()
+    app.state.dssd_verifier_service = smoke_modules.DSSDVerifierService(
+        _StubVerifierEngine(),
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=1),
+        ),
+    )
+    smoke_modules.attach_router(app)
+
+    transport = smoke_modules.HTTPDSSDTransport(
+        base_url="http://testserver",
+        network_simulation=SimpleNamespace(
+            latency_ms=0.0,
+            bandwidth_mbps=None,
+            jitter_ms=0.0,
+        ),
+        client=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ),
+    )
+    raw_request = SimpleNamespace(state=SimpleNamespace())
+    try:
+        coordinator = _Coordinator(
+            edge_engine=_StubEdgeEngine(),
+            transport=transport,
+            gamma=1,
+        )
+        await coordinator.create_chat_completion(
+            request=_attach_sampling_params(SimpleNamespace(
+                stream=False,
+                max_tokens=4,
+                stop_token_ids=[],
+                user="edge-user",
+            )),
+            raw_request=raw_request,
+            serving=_StubServing(),
+        )
+    finally:
+        await transport.aclose()
+
+    exported = raw_request.state.dssd_experiment_result
+    assert exported["request"]["accepted_tokens"] == 2
+    assert exported["request"]["rejected_rounds"] == 1
+    assert exported["request"]["uplink_bytes"] > 0
+    assert exported["request"]["downlink_bytes"] > 0
+    assert exported["request"]["latency_ms"]["total"] >= 0.0
+    assert [round_entry["accepted_count"] for round_entry in exported["rounds"]] == [
+        1,
+        1,
+    ]
+    assert exported["rounds"][1]["reject_index"] == 0
+    assert exported["run"] == {
+        "mode": "dssd",
+        "edge_model_id": "edge-model",
+        "verifier_model_id": "target-model",
+        "sampling": {
+            "temperature": 0.6,
+            "top_p": 0.75,
+            "top_k": 11,
+            "min_p": 0.03,
+            "max_tokens": 4,
+        },
+        "network": {
+            "latency_ms": 0.0,
+            "bandwidth_mbps": None,
+            "jitter_ms": 0.0,
+        },
+    }
 
 
 @pytest.mark.asyncio

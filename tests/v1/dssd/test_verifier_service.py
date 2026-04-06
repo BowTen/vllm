@@ -36,11 +36,20 @@ def _load_module(module_name: str, file_path: Path):
 _install_package_stub("vllm", VLLM_DIR)
 _install_package_stub("vllm.v1", VLLM_DIR / "v1")
 _install_package_stub("vllm.v1.dssd", DSSD_DIR)
+_install_package_stub("vllm.v1.dssd.engine", DSSD_DIR / "engine")
 _install_package_stub("vllm.v1.dssd.verifier", VERIFIER_DIR)
+
+sampling_params_module = types.ModuleType("vllm.sampling_params")
+sampling_params_module.SamplingParams = type("SamplingParams", (), {})
+sys.modules["vllm.sampling_params"] = sampling_params_module
 
 protocol_module = _load_module(
     "vllm.v1.dssd.protocol",
     DSSD_DIR / "protocol.py",
+)
+_load_module(
+    "vllm.v1.dssd.engine.batch_planner",
+    DSSD_DIR / "engine" / "batch_planner.py",
 )
 session_module = _load_module(
     "vllm.v1.dssd.verifier.session",
@@ -59,6 +68,29 @@ VerifierForwardResult = protocol_module.VerifierForwardResult
 VerifierSessionInitRequest = protocol_module.VerifierSessionInitRequest
 VerifierCommitRequest = protocol_module.VerifierCommitRequest
 DSSDVerifierService = service_module.DSSDVerifierService
+
+
+async def _bind_and_create_session(service, *, request_id: str, digest: str):
+    bind_response = await service.bind_verifier(
+        BindVerifierRequest(
+            protocol_version="v1alpha1",
+            edge_instance_id="edge-1",
+            tokenizer_hash="tok",
+            vocab_hash="voc",
+            supported_gamma_max=2,
+        )
+    )
+    session_response = await service.create_session(
+        CreateSessionRequest(
+            binding_id=bind_response.binding_id,
+            request_id=request_id,
+            prompt_token_ids=[10],
+            sampling_params_digest=digest,
+            max_new_tokens=4,
+            stop_token_ids=[],
+        )
+    )
+    return bind_response, session_response
 
 
 @pytest.mark.asyncio
@@ -407,3 +439,205 @@ async def test_verifier_service_treats_none_close_result_as_success():
     assert len(engine.close_requests) == 1
     with pytest.raises(ValueError, match="unknown verifier session"):
         service.session_manager.get_session(session_response.verifier_session_id)
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_batches_compatible_round_requests():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+            self.batch_calls = []
+            self.single_calls = []
+
+        async def dssd_verify_round_async(self, request):
+            self.single_calls.append(request)
+            raise AssertionError("compatible requests should use batch path")
+
+        async def dssd_verify_round_batch_async(self, requests):
+            self.batch_calls.append(requests)
+            return [
+                VerifyRoundResponse(
+                    verifier_session_id=request.verifier_session_id,
+                    seq_no=request.seq_no,
+                    accepted_count=len(request.draft_token_ids),
+                    all_accepted=True,
+                    bonus_token_id=9 + index,
+                )
+                for index, request in enumerate(requests)
+            ]
+
+    engine = _Engine()
+    service = DSSDVerifierService(
+        engine,
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response, session_a = await _bind_and_create_session(
+        service,
+        request_id="req-batch-a",
+        digest="shared-digest",
+    )
+    bind_response_b, session_b = await _bind_and_create_session(
+        service,
+        request_id="req-batch-b",
+        digest="shared-digest",
+    )
+
+    responses = await service.verify_rounds([
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_a.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[3, 4],
+            q_values=[0.7, 0.8],
+        ),
+        VerifyRoundRequest(
+            binding_id=bind_response_b.binding_id,
+            verifier_session_id=session_b.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[5, 6],
+            q_values=[0.6, 0.9],
+        ),
+    ])
+
+    assert len(engine.batch_calls) == 1
+    assert engine.single_calls == []
+    assert [response.verifier_session_id for response in responses] == [
+        session_a.verifier_session_id,
+        session_b.verifier_session_id,
+    ]
+    assert service.session_manager.get_session(
+        session_a.verifier_session_id
+    ).committed_token_ids == [10, 3, 4, 9]
+    assert service.session_manager.get_session(
+        session_b.verifier_session_id
+    ).committed_token_ids == [10, 5, 6, 10]
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_falls_back_to_single_rounds_for_incompatible_batch_keys():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+            self.batch_calls = []
+            self.single_calls = []
+
+        async def dssd_verify_round_async(self, request):
+            self.single_calls.append(request)
+            return VerifyRoundResponse(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                accepted_count=1,
+                all_accepted=True,
+                bonus_token_id=7,
+            )
+
+        async def dssd_verify_round_batch_async(self, requests):
+            self.batch_calls.append(requests)
+            raise AssertionError("incompatible requests should not batch")
+
+    engine = _Engine()
+    service = DSSDVerifierService(
+        engine,
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response, session_a = await _bind_and_create_session(
+        service,
+        request_id="req-single-a",
+        digest="digest-a",
+    )
+    bind_response_b, session_b = await _bind_and_create_session(
+        service,
+        request_id="req-single-b",
+        digest="digest-b",
+    )
+
+    responses = await service.verify_rounds([
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_a.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[3, 4],
+            q_values=[0.7, 0.8],
+        ),
+        VerifyRoundRequest(
+            binding_id=bind_response_b.binding_id,
+            verifier_session_id=session_b.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[5],
+            q_values=[0.6],
+        ),
+    ])
+
+    assert engine.batch_calls == []
+    assert len(engine.single_calls) == 2
+    assert [response.bonus_token_id for response in responses] == [7, 7]
+
+
+@pytest.mark.asyncio
+async def test_verifier_service_falls_back_to_unbatched_execution_for_same_session_ordering():
+    class _Engine:
+        def __init__(self) -> None:
+            self.model_config = SimpleNamespace(model="target-model")
+            self.batch_calls = []
+            self.single_calls = []
+
+        async def dssd_verify_round_async(self, request):
+            self.single_calls.append(request)
+            return VerifyRoundResponse(
+                verifier_session_id=request.verifier_session_id,
+                seq_no=request.seq_no,
+                accepted_count=1,
+                all_accepted=True,
+                bonus_token_id=8 + request.seq_no,
+            )
+
+        async def dssd_verify_round_batch_async(self, requests):
+            self.batch_calls.append(requests)
+            raise AssertionError("same-session requests should not batch")
+
+    engine = _Engine()
+    service = DSSDVerifierService(
+        engine,
+        SimpleNamespace(
+            dssd_config=SimpleNamespace(enabled=True, role="verifier", gamma=2),
+        ),
+    )
+    bind_response, session_response = await _bind_and_create_session(
+        service,
+        request_id="req-ordering",
+        digest="shared-digest",
+    )
+
+    responses = await service.verify_rounds([
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_response.verifier_session_id,
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[3],
+            q_values=[0.7],
+        ),
+        VerifyRoundRequest(
+            binding_id=bind_response.binding_id,
+            verifier_session_id=session_response.verifier_session_id,
+            seq_no=1,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[4],
+            q_values=[0.6],
+        ),
+    ])
+
+    assert engine.batch_calls == []
+    assert len(engine.single_calls) == 2
+    assert [response.seq_no for response in responses] == [0, 1]
+    assert service.session_manager.get_session(
+        session_response.verifier_session_id
+    ).committed_token_ids == [10, 3, 8, 4, 9]

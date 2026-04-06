@@ -28,6 +28,8 @@ class DSSDConfig:
     """DSSD role, either `edge` or `verifier` when enabled."""
     gamma: int = 4
     """Number of draft tokens per verification round."""
+    experiment_mode: str = "dssd"
+    """Experiment mode for edge runs, either `dssd` or `baseline`."""
     verifier_url: str | None = None
     """Verifier endpoint URL required for edge mode."""
     network_simulation: DSSDNetworkSimulationConfig = field(
@@ -45,7 +47,16 @@ class DSSDConfig:
         if self.gamma < 1:
             raise ValueError("DSSDConfig.gamma must be >= 1")
 
-        if self.role == "edge" and not self.verifier_url:
+        if self.experiment_mode not in {"dssd", "baseline"}:
+            raise ValueError(
+                "DSSDConfig.experiment_mode must be 'dssd' or 'baseline'"
+            )
+
+        if (
+            self.role == "edge"
+            and self.experiment_mode == "dssd"
+            and not self.verifier_url
+        ):
             raise ValueError("DSSD edge mode requires verifier_url")
 
         return self

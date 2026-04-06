@@ -151,10 +151,19 @@ _install_package_stub("vllm", VLLM_DIR)
 _install_package_stub("vllm.v1", VLLM_DIR / "v1")
 _install_package_stub("vllm.v1.dssd", DSSD_DIR)
 _install_package_stub("vllm.v1.dssd.engine", DSSD_DIR / "engine")
+_install_package_stub("vllm.v1.dssd.worker", DSSD_DIR / "worker")
 _install_package_stub("vllm.v1.engine", ENGINE_DIR)
 _install_package_stub("vllm.lora", VLLM_DIR / "lora")
 _install_package_stub("vllm.utils", VLLM_DIR / "utils")
 _install_package_stub("vllm.v1.pool", VLLM_DIR / "v1" / "pool")
+
+sampling_params_module = types.ModuleType("vllm.sampling_params")
+sampling_params_module.SamplingParams = type("SamplingParams", (), {})
+sys.modules["vllm.sampling_params"] = sampling_params_module
+_install_module_stub(
+    "vllm.v1.dssd.worker.draft_runner",
+    DraftRoundResult=object,
+)
 
 protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
 session_store_module = _load_module(
@@ -194,6 +203,39 @@ async def test_async_client_exposes_verify_round_utility():
 
     assert result == "ok"
     client.call_utility_async.assert_awaited_once_with("dssd_verify_round", request)
+
+
+@pytest.mark.asyncio
+async def test_async_client_exposes_verify_round_batch_utility():
+    client = object.__new__(AsyncMPClient)
+    client.call_utility_async = AsyncMock(return_value=["ok-a", "ok-b"])
+
+    requests = [
+        VerifyRoundRequest(
+            binding_id="bind-1",
+            verifier_session_id="vs-1",
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[1, 2],
+            q_values=[0.5, 0.4],
+        ),
+        VerifyRoundRequest(
+            binding_id="bind-2",
+            verifier_session_id="vs-2",
+            seq_no=0,
+            prefix_delta_token_ids=[],
+            draft_token_ids=[3],
+            q_values=[0.7],
+        ),
+    ]
+
+    result = await AsyncMPClient.dssd_verify_round_batch_async(client, requests)
+
+    assert result == ["ok-a", "ok-b"]
+    client.call_utility_async.assert_awaited_once_with(
+        "dssd_verify_round_batch",
+        requests,
+    )
 
 
 @pytest.mark.asyncio

@@ -149,6 +149,9 @@ class WorkerBase:
     def dssd_verify_round(self, request: Any) -> Any:
         return self._run_dssd_hook("dssd_verify_round", request)
 
+    def dssd_verify_round_batch(self, request: Any) -> Any:
+        return self._run_dssd_hook("dssd_verify_round_batch", request)
+
     def dssd_close_verifier_session(self, request: Any) -> Any:
         return self._run_dssd_hook("dssd_close_verifier_session", request)
 

@@ -6897,6 +6897,13 @@ class GPUModelRunner(
 
         return run_verifier_replay_forward(self, request)
 
+    def dssd_verify_round_batch(self, request: Any) -> Any:
+        from vllm.v1.dssd.worker.verifier_runner import (
+            run_verifier_replay_forward_batch,
+        )
+
+        return run_verifier_replay_forward_batch(self, request)
+
     def dssd_close_verifier_session(self, request: Any) -> Any:
         from vllm.v1.dssd.worker.verifier_runner import (
             close_verifier_replay_session,

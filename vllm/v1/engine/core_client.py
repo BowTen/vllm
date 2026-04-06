@@ -273,6 +273,11 @@ class EngineCoreClient(ABC):
     ) -> VerifierForwardResult:
         raise NotImplementedError
 
+    async def dssd_verify_round_batch_async(
+        self, requests: list[VerifyRoundRequest]
+    ) -> list[VerifierForwardResult]:
+        raise NotImplementedError
+
     async def dssd_create_verifier_session_async(
         self, request: VerifierSessionInitRequest
     ) -> bool:
@@ -1184,6 +1189,11 @@ class AsyncMPClient(MPClient):
         self, request: VerifyRoundRequest
     ) -> VerifierForwardResult:
         return await self.call_utility_async("dssd_verify_round", request)
+
+    async def dssd_verify_round_batch_async(
+        self, requests: list[VerifyRoundRequest]
+    ) -> list[VerifierForwardResult]:
+        return await self.call_utility_async("dssd_verify_round_batch", requests)
 
     async def dssd_create_verifier_session_async(
         self, request: VerifierSessionInitRequest

@@ -7,6 +7,11 @@ from uuid import uuid4
 
 import msgspec
 
+from vllm.v1.dssd.engine.batch_planner import (
+    VerifierRoundBatchItem,
+    VerifierRoundBatchKey,
+    VerifierRoundBatcher,
+)
 from vllm.v1.dssd.protocol import (
     BindVerifierRequest,
     BindVerifierResponse,
@@ -90,24 +95,126 @@ class DSSDVerifierService:
     async def verify_round(
         self, request: VerifyRoundRequest
     ) -> VerifyRoundResponse:
-        self._ensure_binding(request.binding_id)
-        session = self.session_manager.get_session(request.verifier_session_id)
-        if session.binding_id != request.binding_id:
-            raise ValueError("binding_id does not match verifier session")
+        return (await self.verify_rounds([request]))[0]
 
-        cached = self.session_manager.get_cached_response(
-            request.verifier_session_id,
-            seq_no=request.seq_no,
-        )
-        if cached is not None:
-            return cached
+    async def verify_rounds(
+        self, requests: list[VerifyRoundRequest]
+    ) -> list[VerifyRoundResponse]:
+        if not requests:
+            return []
 
-        self.session_manager.ensure_next_seq_no(
-            request.verifier_session_id,
-            request.seq_no,
-        )
+        responses: list[VerifyRoundResponse | None] = [None] * len(requests)
+        session_occurrences: dict[str, int] = {}
+        for request in requests:
+            session_occurrences[request.verifier_session_id] = (
+                session_occurrences.get(request.verifier_session_id, 0) + 1
+            )
 
+        batcher = VerifierRoundBatcher()
+        sequential_payloads = []
+
+        for index, request in enumerate(requests):
+            self._ensure_binding(request.binding_id)
+            session = self.session_manager.get_session(request.verifier_session_id)
+            if session.binding_id != request.binding_id:
+                raise ValueError("binding_id does not match verifier session")
+
+            cached = self.session_manager.get_cached_response(
+                request.verifier_session_id,
+                seq_no=request.seq_no,
+            )
+            if cached is not None:
+                responses[index] = cached
+                continue
+
+            if session_occurrences[request.verifier_session_id] > 1:
+                sequential_payloads.append((index, request, session))
+                continue
+
+            self.session_manager.ensure_next_seq_no(
+                request.verifier_session_id,
+                request.seq_no,
+            )
+            batcher.add(
+                VerifierRoundBatchItem(
+                    verifier_session_id=request.verifier_session_id,
+                    batch_key=VerifierRoundBatchKey(
+                        gamma=len(request.draft_token_ids),
+                        sampling_signature=session.sampling_params_fingerprint,
+                    ),
+                    payload=(index, request, session),
+                )
+            )
+
+        for batch in batcher.flush():
+            batch_payloads = [item.payload for item in batch.items]
+            if self._can_batch_payloads(batch_payloads):
+                await self._execute_batched_payloads(batch_payloads, responses)
+            else:
+                for index, request, session in batch_payloads:
+                    responses[index] = await self._execute_verify_round(
+                        request=request,
+                        session=session,
+                    )
+
+        for index, request, session in sequential_payloads:
+            self.session_manager.ensure_next_seq_no(
+                request.verifier_session_id,
+                request.seq_no,
+            )
+            responses[index] = await self._execute_verify_round(
+                request=request,
+                session=session,
+            )
+
+        return [msgspec.convert(response, type=VerifyRoundResponse)
+                for response in responses]
+
+    def _can_batch_payloads(self, payloads) -> bool:
+        if len(payloads) <= 1:
+            return False
+        if not hasattr(self.engine_client, "dssd_verify_round_batch_async"):
+            return False
+        session_ids = [request.verifier_session_id for _, request, _ in payloads]
+        return len(session_ids) == len(set(session_ids))
+
+    async def _execute_batched_payloads(
+        self,
+        payloads,
+        responses: list[VerifyRoundResponse | None],
+    ) -> None:
+        requests = [request for _, request, _ in payloads]
+        raw_responses = await self.engine_client.dssd_verify_round_batch_async(requests)
+        if len(raw_responses) != len(payloads):
+            raise RuntimeError(
+                "dssd_verify_round_batch_async returned mismatched response count"
+            )
+        for (index, request, session), raw_response in zip(
+            payloads,
+            raw_responses,
+            strict=True,
+        ):
+            responses[index] = await self._finalize_verify_round(
+                request=request,
+                session=session,
+                raw_response=raw_response,
+            )
+
+    async def _execute_verify_round(self, *, request: VerifyRoundRequest, session):
         raw_response = await self.engine_client.dssd_verify_round_async(request)
+        return await self._finalize_verify_round(
+            request=request,
+            session=session,
+            raw_response=raw_response,
+        )
+
+    async def _finalize_verify_round(
+        self,
+        *,
+        request: VerifyRoundRequest,
+        session,
+        raw_response,
+    ) -> VerifyRoundResponse:
         response = self._coerce_verify_response(
             request=request,
             raw_response=raw_response,
