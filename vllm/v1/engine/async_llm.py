@@ -947,6 +947,24 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
+    async def dssd_verify_round_async(self, request):
+        return await self.engine_core.dssd_verify_round_async(request)
+
+    async def dssd_verify_round_batch_async(self, requests):
+        return await self.engine_core.dssd_verify_round_batch_async(requests)
+
+    async def dssd_create_verifier_session_async(self, request):
+        return await self.engine_core.dssd_create_verifier_session_async(request)
+
+    async def dssd_close_verifier_session_async(self, request):
+        return await self.engine_core.dssd_close_verifier_session_async(request)
+
+    async def dssd_commit_verifier_tokens_async(self, request):
+        return await self.engine_core.dssd_commit_verifier_tokens_async(request)
+
+    async def dssd_draft_round_async(self, request):
+        return await self.engine_core.dssd_draft_round_async(request)
+
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()

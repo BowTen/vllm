@@ -1213,7 +1213,12 @@ class AsyncMPClient(MPClient):
     async def dssd_draft_round_async(
         self, request: DraftRoundRequest
     ) -> DraftRoundResult:
-        return await self.call_utility_async("dssd_draft_round", request)
+        result = await self.call_utility_async("dssd_draft_round", request)
+        if isinstance(result, DraftRoundResult):
+            return result
+        if isinstance(result, dict):
+            return msgspec.convert(result, type=DraftRoundResult)
+        return result
 
     async def collective_rpc_async(
         self,

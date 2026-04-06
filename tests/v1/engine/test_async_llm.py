@@ -4,7 +4,8 @@
 import asyncio
 import time
 from contextlib import ExitStack
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,6 +25,13 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.dssd.protocol import (
+    CloseSessionRequest,
+    DraftRoundRequest,
+    VerifierCommitRequest,
+    VerifierSessionInitRequest,
+    VerifyRoundRequest,
+)
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
@@ -389,6 +397,76 @@ async def test_mid_stream_cancellation(
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio
+async def test_async_llm_exposes_dssd_utilities():
+    engine = object.__new__(AsyncLLM)
+    engine.engine_core = SimpleNamespace(
+        dssd_verify_round_async=AsyncMock(return_value="verify-ok"),
+        dssd_verify_round_batch_async=AsyncMock(return_value=["batch-ok"]),
+        dssd_create_verifier_session_async=AsyncMock(return_value=True),
+        dssd_close_verifier_session_async=AsyncMock(return_value=True),
+        dssd_commit_verifier_tokens_async=AsyncMock(return_value=True),
+        dssd_draft_round_async=AsyncMock(return_value="draft-ok"),
+        shutdown=lambda timeout=None: None,
+    )
+    engine.output_handler = None
+    engine.logger_manager = None
+    engine.profiler = None
+
+    verify_request = VerifyRoundRequest(
+        binding_id="bind-1",
+        verifier_session_id="vs-1",
+        seq_no=0,
+        prefix_delta_token_ids=[],
+        draft_token_ids=[1, 2],
+        q_values=[0.5, 0.4],
+    )
+    session_request = VerifierSessionInitRequest(
+        verifier_session_id="vs-1",
+        binding_id="bind-1",
+        sampling_params_digest="digest-1",
+        prompt_token_ids=[1, 2, 3],
+    )
+    close_request = CloseSessionRequest(verifier_session_id="vs-1")
+    commit_request = VerifierCommitRequest(
+        verifier_session_id="vs-1",
+        token_ids=[4, 5],
+    )
+    draft_request = DraftRoundRequest(
+        local_session_id="edge-1",
+        prompt_token_ids=[1, 2, 3],
+        committed_token_ids=[4],
+        seq_no=0,
+        gamma=2,
+    )
+
+    assert await engine.dssd_verify_round_async(verify_request) == "verify-ok"
+    assert (
+        await engine.dssd_verify_round_batch_async([verify_request]) == ["batch-ok"]
+    )
+    assert await engine.dssd_create_verifier_session_async(session_request) is True
+    assert await engine.dssd_close_verifier_session_async(close_request) is True
+    assert await engine.dssd_commit_verifier_tokens_async(commit_request) is True
+    assert await engine.dssd_draft_round_async(draft_request) == "draft-ok"
+
+    engine.engine_core.dssd_verify_round_async.assert_awaited_once_with(
+        verify_request
+    )
+    engine.engine_core.dssd_verify_round_batch_async.assert_awaited_once_with(
+        [verify_request]
+    )
+    engine.engine_core.dssd_create_verifier_session_async.assert_awaited_once_with(
+        session_request
+    )
+    engine.engine_core.dssd_close_verifier_session_async.assert_awaited_once_with(
+        close_request
+    )
+    engine.engine_core.dssd_commit_verifier_tokens_async.assert_awaited_once_with(
+        commit_request
+    )
+    engine.engine_core.dssd_draft_round_async.assert_awaited_once_with(draft_request)
 
 
 class MockLoggingStatLogger(LoggingStatLogger):

@@ -7,6 +7,7 @@ import importlib.util
 import sys
 import types
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -52,6 +53,14 @@ def _noop_decorator(*args, **kwargs):
         return func
 
     return decorator
+
+
+@dataclass
+class _DraftRoundResult:
+    draft_token_ids: list[int]
+    q_values: list[float]
+    q_dists_handle: str
+    q_distributions: list[list[float]] | None = None
 
 
 def _install_core_client_stubs() -> None:
@@ -162,7 +171,7 @@ sampling_params_module.SamplingParams = type("SamplingParams", (), {})
 sys.modules["vllm.sampling_params"] = sampling_params_module
 _install_module_stub(
     "vllm.v1.dssd.worker.draft_runner",
-    DraftRoundResult=object,
+    DraftRoundResult=_DraftRoundResult,
 )
 
 protocol = _load_module("vllm.v1.dssd.protocol", DSSD_DIR / "protocol.py")
@@ -241,7 +250,14 @@ async def test_async_client_exposes_verify_round_batch_utility():
 @pytest.mark.asyncio
 async def test_async_client_exposes_draft_round_utility():
     client = object.__new__(AsyncMPClient)
-    client.call_utility_async = AsyncMock(return_value="draft-ok")
+    client.call_utility_async = AsyncMock(
+        return_value={
+            "draft_token_ids": [7, 8],
+            "q_values": [0.7, 0.8],
+            "q_dists_handle": "edge-1:0",
+            "q_distributions": [[0.3, 0.7], [0.2, 0.8]],
+        }
+    )
 
     request = DraftRoundRequest(
         local_session_id="edge-1",
@@ -253,7 +269,10 @@ async def test_async_client_exposes_draft_round_utility():
 
     result = await AsyncMPClient.dssd_draft_round_async(client, request)
 
-    assert result == "draft-ok"
+    assert isinstance(result, _DraftRoundResult)
+    assert result.draft_token_ids == [7, 8]
+    assert result.q_values == [0.7, 0.8]
+    assert result.q_dists_handle == "edge-1:0"
     client.call_utility_async.assert_awaited_once_with("dssd_draft_round", request)
 
 
