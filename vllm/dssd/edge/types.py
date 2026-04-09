@@ -50,7 +50,7 @@ class EdgeRoundState:
         self.draft_q_values.append(float(q_value))
 
     def q_dist_at(self, index: int) -> torch.Tensor:
-        return self.logits_row_view(index)
+        return self.logits_row_view(index)[0]
 
 
 @dataclass

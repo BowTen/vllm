@@ -73,7 +73,7 @@ def test_edge_round_state_prepare_logits_buffer_reuses_matching_buffer() -> None
     assert round_state.draft_logits_buffer is buffer
 
 
-def test_edge_round_state_q_dist_at_returns_row_view() -> None:
+def test_edge_round_state_q_dist_at_returns_logits_vector() -> None:
     round_state = EdgeRoundState()
     round_state.prepare_logits_buffer(
         gamma=2,
@@ -86,8 +86,8 @@ def test_edge_round_state_q_dist_at_returns_row_view() -> None:
 
     q_dist = round_state.q_dist_at(1)
 
-    assert q_dist.shape == (1, 4)
-    assert torch.equal(q_dist, round_state.logits_row_view(1))
+    assert q_dist.shape == (4,)
+    assert torch.equal(q_dist, round_state.draft_logits_buffer[1])
 
 
 def test_edge_session_defaults_include_round_state_and_lora_request() -> None:
