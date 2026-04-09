@@ -54,6 +54,7 @@ class EdgeSchedulerAdapter:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=self._take_new_block_ids_to_zero(),
         )
 
     def build_decode_step(self, session: EdgeSession) -> SchedulerOutput:

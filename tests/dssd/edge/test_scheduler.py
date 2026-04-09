@@ -16,10 +16,16 @@ class FakeKVCacheManager:
     def __init__(self):
         self.allocate_calls = []
         self.freed_requests = []
-        self._new_block_ids = [41, 42]
+        self._new_block_ids = []
+        self._new_block_id_batches = [[41, 42], [51, 52]]
 
     def allocate_slots(self, request, num_new_tokens):
         self.allocate_calls.append((request, num_new_tokens))
+        batch_index = len(self.allocate_calls) - 1
+        if batch_index < len(self._new_block_id_batches):
+            self._new_block_ids = self._new_block_id_batches[batch_index]
+        else:
+            self._new_block_ids = []
         return FakeBlocks(([7, 8],))
 
     def take_new_block_ids(self):
@@ -58,9 +64,10 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
 
     assert block_ids == ([7, 8],)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
+    assert prefill.new_block_ids_to_zero == [41, 42]
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
-    assert decode.new_block_ids_to_zero == [41, 42]
+    assert decode.new_block_ids_to_zero == [51, 52]
 
 
 def test_close_step_and_free_blocks() -> None:
