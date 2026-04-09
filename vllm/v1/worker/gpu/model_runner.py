@@ -1159,6 +1159,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return async_output
         return async_output.get_output()
 
+    def take_execute_model_state(self) -> "ExecuteModelState":
+        if self.execute_model_state is None:
+            raise RuntimeError("execute_model_state is empty")
+        state = self.execute_model_state
+        self.execute_model_state = None
+        return state
+
+    @torch.inference_mode()
+    def sample_without_postprocess(
+        self,
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> SamplerOutput:
+        sampler_output, _, _ = self.sample(
+            hidden_states,
+            input_batch,
+            grammar_output,
+        )
+        return sampler_output
+
+    def commit_input_token(self, req_idx: int, token_id: int) -> None:
+        token_id = int(token_id)
+        total_len = int(self.req_states.total_len.gpu[req_idx].item())
+        self.req_states.last_sampled_tokens[req_idx, 0] = token_id
+        self.req_states.all_token_ids.gpu[req_idx, total_len] = token_id
+        self.req_states.total_len.gpu[req_idx] = total_len + 1
+        if self.is_last_pp_rank and self.sampler is not None:
+            output_bin_counts = self.sampler.penalties_state.output_bin_counts
+            output_bin_counts[req_idx, token_id] += 1
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
 
