@@ -70,6 +70,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
         prompt_token_ids=session.prompt_token_ids,
         sampling_params=session.sampling_params,
     )
+    session.block_ids = block_ids
     kv.set_new_block_ids([99])
     prefill = adapter.build_prefill_step(session)
     preserved_queue_ids = kv.take_new_block_ids()
@@ -83,6 +84,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert prefill_num_new_tokens == len(session.prompt_token_ids)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
     assert prefill.new_block_ids_to_zero == [41, 42]
+    assert prefill.scheduled_new_reqs[0].block_ids == block_ids
     assert preserved_queue_ids == [99]
     assert decode_num_new_tokens == 1
     assert decode_num_new_tokens == (
@@ -93,6 +95,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     ]
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
+    assert decode.scheduled_cached_reqs.new_block_ids == [([7, 8],)]
     assert decode.new_block_ids_to_zero == [51, 52]
 
 
