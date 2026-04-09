@@ -67,6 +67,7 @@ def test_scheduler_tracks_new_blocks_for_open_and_verify_steps() -> None:
     round_blocks.get_unhashed_block_ids_all_groups.return_value = [[8]]
     kv_cache_manager = mock.MagicMock()
     kv_cache_manager.allocate_slots.side_effect = [prompt_blocks, round_blocks]
+    kv_cache_manager.take_new_block_ids.side_effect = [[7], [8]]
     adapter = VerifierSchedulerAdapter(kv_cache_manager=kv_cache_manager)
 
     session = _build_session()
@@ -92,6 +93,7 @@ def test_scheduler_tracks_new_blocks_for_open_and_verify_steps() -> None:
     assert verify_step.new_block_ids_to_zero == [8]
     verify_allocate = kv_cache_manager.allocate_slots.call_args_list[1]
     assert verify_allocate.kwargs["num_new_tokens"] == 3
+    assert kv_cache_manager.take_new_block_ids.call_count == 2
 
 
 def test_scheduler_build_steps_and_free_blocks_follow_session_shape() -> None:
@@ -198,6 +200,9 @@ def test_prepare_round_and_commit_committed_token_update_state() -> None:
 
     bridge.prepare_round(session, request, model_runner, gamma=4)
 
+    with pytest.raises(ValueError, match="already in progress"):
+        bridge.prepare_round(session, request, model_runner, gamma=4)
+
     assert int(model_runner.req_states.last_sampled_tokens[0, 0].item()) == 9
     assert model_runner.req_states.draft_tokens[0].tolist() == [11, 12, 0, 0]
     round_state = bridge._round_state(session)
@@ -208,14 +213,17 @@ def test_prepare_round_and_commit_committed_token_update_state() -> None:
     bridge.set_round_q_values(session, [0.7, 0.8])
     assert round_state.draft_q_values == [0.7, 0.8]
 
+    with pytest.raises(ValueError, match="prepared committed token"):
+        bridge.commit_committed_token_before_postprocess(session, 10, model_runner)
+
     bridge.commit_committed_token_before_postprocess(session, 9, model_runner)
 
     model_runner.commit_input_token.assert_called_once_with(0, 9)
     assert session.token_ids == [1, 2, 3, 9]
     assert session.total_len == 4
 
-    with pytest.raises(ValueError, match="prepared committed token"):
-        bridge.commit_committed_token_before_postprocess(session, 10, model_runner)
+    with pytest.raises(ValueError, match="already committed"):
+        bridge.commit_committed_token_before_postprocess(session, 9, model_runner)
 
 
 def test_set_round_result_only_commits_accepted_prefix() -> None:
@@ -242,7 +250,12 @@ def test_set_round_result_only_commits_accepted_prefix() -> None:
     assert session.token_ids == [1, 2, 3, 9, 11, 12]
     assert session.total_len == 6
     assert session.num_computed_tokens == 6
-    assert bridge._round_state(session).last_result is None
+    round_state = bridge._round_state(session)
+    assert round_state.committed_token_id is None
+    assert round_state.committed_token_committed is False
+    assert round_state.draft_token_ids == []
+    assert round_state.draft_q_values == []
+    assert not hasattr(round_state, "last_result")
 
 
 def test_set_round_result_requires_committed_token_to_be_committed_first() -> None:
@@ -269,18 +282,17 @@ def test_round_state_helpers_reset_and_remove_tracking() -> None:
     bridge = VerifierStateBridge()
     round_state = bridge._round_state(session)
     round_state.committed_token_id = 9
+    round_state.committed_token_committed = True
     round_state.draft_token_ids = [11, 12]
     round_state.draft_q_values = [0.2, 0.3]
-    round_state.last_result = VerifierRoundResult(
-        req_id="req-1", accepted_len=1, rejected_step=0
-    )
 
     bridge.clear_round_state(session)
 
     assert round_state.committed_token_id is None
+    assert round_state.committed_token_committed is False
     assert round_state.draft_token_ids == []
     assert round_state.draft_q_values == []
-    assert round_state.last_result is None
+    assert not hasattr(round_state, "last_result")
 
     bridge.remove_round_state(session)
 

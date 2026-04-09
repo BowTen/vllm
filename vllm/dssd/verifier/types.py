@@ -66,11 +66,9 @@ class VerifierRoundState:
     committed_token_committed: bool = False
     draft_token_ids: list[int] = field(default_factory=list)
     draft_q_values: list[float] = field(default_factory=list)
-    last_result: VerifierRoundResult | None = None
 
     def reset(self) -> None:
         self.committed_token_id = None
         self.committed_token_committed = False
         self.draft_token_ids.clear()
         self.draft_q_values.clear()
-        self.last_result = None

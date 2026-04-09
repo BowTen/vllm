@@ -151,19 +151,17 @@ def test_round_result_helpers_match_acceptance_shape(
 
 def test_round_state_reset_clears_round_tracking(
         verifier_modules: SimpleNamespace) -> None:
-    last_result = verifier_modules.VerifierRoundResult(req_id="req-1",
-                                                       accepted_len=1,
-                                                       rejected_step=0)
     state = verifier_modules.VerifierRoundState(
         committed_token_id=9,
+        committed_token_committed=True,
         draft_token_ids=[11, 12],
         draft_q_values=[0.2, 0.3],
-        last_result=last_result,
     )
 
     state.reset()
 
     assert state.committed_token_id is None
+    assert state.committed_token_committed is False
     assert state.draft_token_ids == []
     assert state.draft_q_values == []
-    assert state.last_result is None
+    assert not hasattr(state, "last_result")

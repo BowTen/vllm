@@ -38,6 +38,10 @@ class VerifierStateBridge:
         self._validate_req_id(session.req_id, request.req_id)
         request.validate(gamma=gamma)
 
+        round_state = self._round_state(session)
+        if round_state.committed_token_id is not None:
+            raise ValueError("round is already in progress")
+
         req_idx = model_runner.req_states.req_id_to_index[session.req_id]
         model_runner.req_states.last_sampled_tokens[
             req_idx, 0
@@ -52,12 +56,10 @@ class VerifierStateBridge:
                 device=draft_tokens.device,
             )
 
-        round_state = self._round_state(session)
         round_state.committed_token_id = request.committed_token_id
         round_state.committed_token_committed = False
         round_state.draft_token_ids = list(request.draft_token_ids)
         round_state.draft_q_values = list(request.draft_q_values)
-        round_state.last_result = None
 
     def set_round_q_values(
         self, session: VerifierSession, q_values: list[float]
@@ -71,6 +73,8 @@ class VerifierStateBridge:
         model_runner: "GPUModelRunner",
     ) -> None:
         round_state = self._round_state(session)
+        if round_state.committed_token_committed:
+            raise ValueError("committed token is already committed for this round")
         if round_state.committed_token_id != committed_token_id:
             raise ValueError(
                 "prepared committed token must match the token being committed"
@@ -95,7 +99,7 @@ class VerifierStateBridge:
         session.token_ids.extend(round_state.draft_token_ids[: result.accepted_len])
         session.num_computed_tokens += 1 + result.accepted_len
         session.total_len += result.accepted_len
-        round_state.committed_token_committed = False
+        round_state.reset()
 
     def clear_round_state(self, session: VerifierSession) -> None:
         self._round_state(session).reset()

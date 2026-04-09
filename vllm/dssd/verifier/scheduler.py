@@ -43,7 +43,9 @@ class VerifierSchedulerAdapter:
         if blocks is None:
             raise RuntimeError("prefill cannot allocate KV blocks for verifier")
 
-        self._pending_new_block_ids_to_zero = self._new_block_ids_to_zero(blocks)
+        self._pending_new_block_ids_to_zero = self._drain_new_block_ids_to_zero(
+            blocks
+        )
         block_ids = blocks.get_block_ids(allow_none=True)
         return ([],) if block_ids is None else block_ids
 
@@ -92,7 +94,7 @@ class VerifierSchedulerAdapter:
             if blocks is None:
                 raise RuntimeError("verify round cannot allocate KV blocks")
             new_block_ids = [blocks.get_block_ids(allow_none=True)]
-            new_block_ids_to_zero = self._new_block_ids_to_zero(blocks)
+            new_block_ids_to_zero = self._drain_new_block_ids_to_zero(blocks)
         scheduled_spec_decode_tokens = (
             {session.req_id: list(request.draft_token_ids)}
             if request.draft_token_ids
@@ -149,6 +151,14 @@ class VerifierSchedulerAdapter:
         block_groups = blocks.get_unhashed_block_ids_all_groups()
         flat_ids = [block_id for group in block_groups for block_id in group]
         return flat_ids or None
+
+    def _drain_new_block_ids_to_zero(
+        self, blocks: KVCacheBlocks
+    ) -> list[int] | None:
+        if self.kv_cache_manager is None:
+            return self._new_block_ids_to_zero(blocks)
+        drained_ids = self.kv_cache_manager.take_new_block_ids()
+        return drained_ids or self._new_block_ids_to_zero(blocks)
 
     def _make_request(self, session: VerifierSession) -> Request:
         request = Request(
