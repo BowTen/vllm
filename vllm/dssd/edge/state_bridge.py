@@ -25,12 +25,14 @@ class EdgeStateBridge:
         input_token_id: int,
         model_runner: GPUModelRunner,
     ) -> None:
+        self._ensure_supported_sampling_params(session)
         req_idx = self._req_idx(session, model_runner)
         req_states = model_runner.req_states
         req_states.last_sampled_tokens[req_idx, 0] = int(input_token_id)
         session.round_state.committed_token_id = int(input_token_id)
 
     def commit_token(self, session: EdgeSession, token_id: int) -> None:
+        self._ensure_supported_sampling_params(session)
         session.append_token(int(token_id), computed_delta=1)
 
     def inject_external_token(
@@ -39,6 +41,7 @@ class EdgeStateBridge:
         token_id: int,
         model_runner: GPUModelRunner,
     ) -> None:
+        self._ensure_supported_sampling_params(session)
         req_idx = self._req_idx(session, model_runner)
         old_total_len = session.total_len
         session.append_token(int(token_id), computed_delta=0)
@@ -77,6 +80,22 @@ class EdgeStateBridge:
 
     def clear_round_state(self, session: EdgeSession) -> None:
         session.round_state.reset()
+
+    def _ensure_supported_sampling_params(self, session: EdgeSession) -> None:
+        sampling_params = session.sampling_params
+        unsupported_param = None
+        if sampling_params.presence_penalty != 0.0:
+            unsupported_param = "presence_penalty"
+        elif sampling_params.frequency_penalty != 0.0:
+            unsupported_param = "frequency_penalty"
+        elif sampling_params.repetition_penalty != 1.0:
+            unsupported_param = "repetition_penalty"
+        elif sampling_params.bad_words:
+            unsupported_param = "bad_words"
+
+        if unsupported_param is not None:
+            raise ValueError(
+                f"edge state bridge does not support {unsupported_param}")
 
     def _req_idx(self, session: EdgeSession, model_runner: GPUModelRunner) -> int:
         req_idx = model_runner.req_states.req_id_to_index.get(session.req_id)
