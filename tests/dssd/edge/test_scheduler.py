@@ -13,11 +13,16 @@ class FakeBlocks:
 
 
 class FakeKVCacheManager:
-    def __init__(self):
+    def __init__(
+        self,
+        allocated_block_ids=(([7, 8],), ([7, 8],)),
+        new_block_id_batches=([41, 42], [51, 52]),
+    ):
         self.allocate_calls = []
         self.freed_requests = []
         self._new_block_ids = []
-        self._new_block_id_batches = [[41, 42], [51, 52]]
+        self._allocated_block_ids = list(allocated_block_ids)
+        self._new_block_id_batches = list(new_block_id_batches)
 
     def allocate_slots(self, request, num_new_tokens):
         self.allocate_calls.append((request, num_new_tokens))
@@ -26,7 +31,9 @@ class FakeKVCacheManager:
             self._new_block_ids = self._new_block_id_batches[batch_index]
         else:
             self._new_block_ids = []
-        return FakeBlocks(([7, 8],))
+        if batch_index < len(self._allocated_block_ids):
+            return FakeBlocks(self._allocated_block_ids[batch_index])
+        return FakeBlocks(None)
 
     def take_new_block_ids(self):
         value = self._new_block_ids
@@ -87,6 +94,30 @@ def test_scheduler_adapter_scope_is_documented() -> None:
     assert EdgeSchedulerAdapter.__doc__ is not None
     assert "single-request" in EdgeSchedulerAdapter.__doc__
     assert "decoder-only text path" in EdgeSchedulerAdapter.__doc__
+
+
+def test_decode_step_handles_missing_new_blocks() -> None:
+    kv = FakeKVCacheManager(
+        allocated_block_ids=(([7, 8],), None),
+        new_block_id_batches=([41, 42], []),
+    )
+    adapter = EdgeSchedulerAdapter(kv)
+    session = make_session()
+
+    adapter.allocate_blocks(
+        req_id=session.req_id,
+        prompt_token_ids=session.prompt_token_ids,
+        sampling_params=session.sampling_params,
+    )
+    prefill = adapter.build_prefill_step(session)
+    decode = adapter.build_decode_step(session)
+
+    assert prefill.new_block_ids_to_zero == [41, 42]
+    assert decode.num_scheduled_tokens == {"req-1": 1}
+    assert decode.total_num_scheduled_tokens == 1
+    assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
+    assert decode.scheduled_cached_reqs.new_block_ids == [None]
+    assert decode.new_block_ids_to_zero is None
 
 
 def test_close_step_and_free_blocks() -> None:
