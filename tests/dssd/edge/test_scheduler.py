@@ -43,6 +43,9 @@ class FakeKVCacheManager:
     def free(self, request):
         self.freed_requests.append(request)
 
+    def set_new_block_ids(self, block_ids):
+        self._new_block_ids = block_ids
+
 
 def make_session() -> EdgeSession:
     return EdgeSession(
@@ -67,7 +70,9 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
         prompt_token_ids=session.prompt_token_ids,
         sampling_params=session.sampling_params,
     )
+    kv.set_new_block_ids([99])
     prefill = adapter.build_prefill_step(session)
+    preserved_queue_ids = kv.take_new_block_ids()
     decode = adapter.build_decode_step(session)
 
     prefill_request, prefill_num_new_tokens = kv.allocate_calls[0]
@@ -78,6 +83,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert prefill_num_new_tokens == len(session.prompt_token_ids)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
     assert prefill.new_block_ids_to_zero == [41, 42]
+    assert preserved_queue_ids == [99]
     assert decode_num_new_tokens == 1
     assert decode_num_new_tokens == (
         decode_request.num_tokens - decode_request.num_computed_tokens
@@ -88,6 +94,37 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
     assert decode.new_block_ids_to_zero == [51, 52]
+
+
+def test_request_block_hasher_is_threaded_into_built_requests() -> None:
+    kv = FakeKVCacheManager()
+    request_block_hasher = lambda request: [f"hash:{tuple(request.all_token_ids)}"]
+    adapter = EdgeSchedulerAdapter(
+        kv, request_block_hasher=request_block_hasher
+    )
+    session = make_session()
+
+    adapter.allocate_blocks(
+        req_id=session.req_id,
+        prompt_token_ids=session.prompt_token_ids,
+        sampling_params=session.sampling_params,
+    )
+    adapter.build_decode_step(session)
+    adapter.free_blocks(session)
+
+    prefill_request, _ = kv.allocate_calls[0]
+    decode_request, _ = kv.allocate_calls[1]
+    close_request = kv.freed_requests[0]
+
+    assert prefill_request.block_hashes == ["hash:(10, 11)"]
+    assert decode_request.block_hashes == [
+        "hash:(10, 11)",
+        "hash:(10, 11, 20)",
+    ]
+    assert close_request.block_hashes == [
+        "hash:(10, 11)",
+        "hash:(10, 11, 20)",
+    ]
 
 
 def test_scheduler_adapter_scope_is_documented() -> None:
@@ -130,3 +167,21 @@ def test_close_step_and_free_blocks() -> None:
 
     assert len(kv.freed_requests) == 1
     assert close_step.finished_req_ids == {"req-1"}
+
+
+def test_free_blocks_clears_pending_prefill_zeroing_metadata() -> None:
+    kv = FakeKVCacheManager()
+    adapter = EdgeSchedulerAdapter(kv)
+    session = make_session()
+
+    adapter.allocate_blocks(
+        req_id=session.req_id,
+        prompt_token_ids=session.prompt_token_ids,
+        sampling_params=session.sampling_params,
+    )
+    kv.set_new_block_ids([99])
+    adapter.free_blocks(session)
+    prefill = adapter.build_prefill_step(session)
+
+    assert prefill.new_block_ids_to_zero is None
+    assert kv.take_new_block_ids() == [99]

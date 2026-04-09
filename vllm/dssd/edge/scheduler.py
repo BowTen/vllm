@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -12,6 +15,9 @@ from vllm.v1.request import Request
 
 from .types import EdgeSession
 
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_utils import BlockHash
+
 
 class EdgeSchedulerAdapter:
     """Adapter for the first-pass single-request, decoder-only text path.
@@ -19,8 +25,14 @@ class EdgeSchedulerAdapter:
     This edge path does not handle multimodal or encoder inputs.
     """
 
-    def __init__(self, kv_cache_manager: KVCacheManager | None = None) -> None:
+    def __init__(
+        self,
+        kv_cache_manager: KVCacheManager | None = None,
+        request_block_hasher: Callable[[Request], list[BlockHash]] | None = None,
+    ) -> None:
         self.kv_cache_manager = kv_cache_manager
+        self.request_block_hasher = request_block_hasher
+        self._pending_prefill_new_block_ids_to_zero: dict[str, list[int] | None] = {}
 
     def allocate_blocks(
         self,
@@ -45,6 +57,9 @@ class EdgeSchedulerAdapter:
         )
         if new_blocks is None:
             raise RuntimeError("prefill failed to allocate KV blocks for edge")
+        self._pending_prefill_new_block_ids_to_zero[req_id] = (
+            self._take_new_block_ids_to_zero()
+        )
         return new_blocks.get_block_ids(allow_none=True)
 
     def build_prefill_step(self, session: EdgeSession) -> SchedulerOutput:
@@ -59,7 +74,9 @@ class EdgeSchedulerAdapter:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            new_block_ids_to_zero=self._take_new_block_ids_to_zero(),
+            new_block_ids_to_zero=self._take_prefill_new_block_ids_to_zero(
+                session.req_id
+            ),
         )
 
     def build_decode_step(self, session: EdgeSession) -> SchedulerOutput:
@@ -93,6 +110,7 @@ class EdgeSchedulerAdapter:
         )
 
     def free_blocks(self, session: EdgeSession) -> None:
+        self._pending_prefill_new_block_ids_to_zero.pop(session.req_id, None)
         if self.kv_cache_manager is None:
             return
         self.kv_cache_manager.free(self._build_close_request(session))
@@ -138,6 +156,7 @@ class EdgeSchedulerAdapter:
             sampling_params=sampling_params,
             pooling_params=None,
             lora_request=lora_request,
+            block_hasher=self.request_block_hasher,
         )
         request.num_computed_tokens = 0
         return request
@@ -149,6 +168,7 @@ class EdgeSchedulerAdapter:
             sampling_params=session.sampling_params,
             pooling_params=None,
             lora_request=session.lora_request,
+            block_hasher=self.request_block_hasher,
         )
         output_token_ids = session.token_ids[session.prompt_len:]
         if output_token_ids:
@@ -180,3 +200,6 @@ class EdgeSchedulerAdapter:
         if self.kv_cache_manager is None:
             return None
         return self.kv_cache_manager.take_new_block_ids() or None
+
+    def _take_prefill_new_block_ids_to_zero(self, req_id: str) -> list[int] | None:
+        return self._pending_prefill_new_block_ids_to_zero.pop(req_id, None)
