@@ -71,7 +71,7 @@ class EdgeSchedulerAdapter:
             total_num_scheduled_tokens=prompt_len,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
+            num_common_prefix_blocks=self._make_num_common_prefix_blocks(),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=self._take_prefill_new_block_ids_to_zero(
@@ -90,7 +90,7 @@ class EdgeSchedulerAdapter:
             total_num_scheduled_tokens=1,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
+            num_common_prefix_blocks=self._make_num_common_prefix_blocks(),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=self._take_new_block_ids_to_zero(),
@@ -104,7 +104,7 @@ class EdgeSchedulerAdapter:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
+            num_common_prefix_blocks=self._make_num_common_prefix_blocks(),
             finished_req_ids={req_id},
             free_encoder_mm_hashes=[],
         )
@@ -203,3 +203,9 @@ class EdgeSchedulerAdapter:
 
     def _take_prefill_new_block_ids_to_zero(self, req_id: str) -> list[int] | None:
         return self._pending_prefill_new_block_ids_to_zero.pop(req_id, None)
+
+    def _make_num_common_prefix_blocks(self) -> list[int]:
+        if self.kv_cache_manager is None:
+            return [0]
+
+        return [0] * max(len(self.kv_cache_manager.kv_cache_config.kv_cache_groups), 1)

@@ -14,17 +14,24 @@ class FakeBlocks:
         return self._block_ids
 
 
+class FakeKVCacheConfig:
+    def __init__(self, num_groups):
+        self.kv_cache_groups = [object() for _ in range(num_groups)]
+
+
 class FakeKVCacheManager:
     def __init__(
         self,
         allocated_block_ids=(([7, 8],), ([7, 8],)),
         new_block_id_batches=([41, 42], [51, 52]),
+        num_kv_cache_groups=1,
     ):
         self.allocate_calls = []
         self.freed_requests = []
         self._new_block_ids = []
         self._allocated_block_ids = list(allocated_block_ids)
         self._new_block_id_batches = list(new_block_id_batches)
+        self.kv_cache_config = FakeKVCacheConfig(num_kv_cache_groups)
 
     def allocate_slots(self, request, num_new_tokens):
         self.allocate_calls.append((request, num_new_tokens))
@@ -86,6 +93,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert prefill_num_new_tokens == len(session.prompt_token_ids)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
     assert prefill.new_block_ids_to_zero == [41, 42]
+    assert prefill.num_common_prefix_blocks == [0]
     assert prefill.scheduled_new_reqs[0].block_ids == block_ids
     assert preserved_queue_ids == [99]
     assert decode_num_new_tokens == 1
@@ -98,6 +106,7 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
     assert decode.scheduled_cached_reqs.new_block_ids == [([7, 8],)]
+    assert decode.num_common_prefix_blocks == [0]
     assert decode.new_block_ids_to_zero == [51, 52]
 
 
@@ -188,6 +197,7 @@ def test_close_step_and_free_blocks() -> None:
     close_step = adapter.build_close_step(session.req_id)
 
     assert len(kv.freed_requests) == 1
+    assert close_step.num_common_prefix_blocks == [0]
     assert close_step.finished_req_ids == {"req-1"}
 
 
