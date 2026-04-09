@@ -90,6 +90,9 @@ class DSSDVerifierSampler:
             sampled_token_ids=sampled,
             logprobs_tensors=None,
             num_nans=None,
+            # This counts only accepted draft tokens; the committed token is
+            # handled separately, so do not pass this through
+            # get_num_sampled_and_rejected.
             num_sampled=accepted_len_gpu.view(1),
         )
 

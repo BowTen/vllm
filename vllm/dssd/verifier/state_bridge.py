@@ -92,10 +92,19 @@ class VerifierStateBridge:
     ) -> None:
         self._validate_req_id(session.req_id, result.req_id)
         round_state = self._round_state(session)
+        draft_len = len(round_state.draft_token_ids)
         if not round_state.committed_token_committed:
             raise ValueError("committed token must be committed before postprocess")
-        if not 0 <= result.accepted_len <= len(round_state.draft_token_ids):
+        if not 0 <= result.accepted_len <= draft_len:
             raise ValueError("accepted_len must be within the current draft range")
+        if result.accepted_len == draft_len and not result.is_all_accepted():
+            raise ValueError(
+                "accepted_len equal to draft_len requires the bonus payload"
+            )
+        if result.accepted_len < draft_len and not result.is_rejected():
+            raise ValueError(
+                "accepted_len below draft_len requires the rejected payload"
+            )
         session.token_ids.extend(round_state.draft_token_ids[: result.accepted_len])
         session.num_computed_tokens += 1 + result.accepted_len
         session.total_len += result.accepted_len

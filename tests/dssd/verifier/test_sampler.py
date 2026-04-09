@@ -89,6 +89,52 @@ def test_all_accept_keeps_bonus_token_as_bypass_result(monkeypatch) -> None:
     )
 
 
+def test_zero_draft_round_returns_bonus_only(monkeypatch) -> None:
+    import vllm.dssd.verifier.sampler as sampler_module
+
+    device = torch.device("cpu")
+    sampler = DSSDVerifierSampler(
+        sampler=_build_fake_sampler(device),
+        num_speculative_steps=2,
+    )
+    input_batch = _build_input_batch(device)
+    logits = torch.tensor(
+        [[1.0, 5.0, 0.0], [0.0, 1.0, 5.0], [5.0, 0.0, 1.0]],
+        device=device,
+    )
+    request = VerifierRoundRequest(
+        req_id="req-1",
+        committed_token_id=7,
+        draft_token_ids=[],
+        draft_q_values=[],
+    )
+
+    monkeypatch.setattr(
+        sampler_module,
+        "gumbel_sample",
+        lambda *_args, **_kwargs: torch.tensor([23], device=device, dtype=torch.int64),
+    )
+
+    sampler_output, raw_result = sampler(logits, input_batch, request)
+    result = raw_result.to_round_result()
+
+    assert torch.equal(
+        raw_result.accepted_len,
+        torch.tensor(0, device=device, dtype=torch.int32),
+    )
+    assert torch.equal(raw_result.all_accepted, torch.tensor(True, device=device))
+    assert result.accepted_len == 0
+    assert result.is_all_accepted()
+    assert not result.is_rejected()
+    assert result.bonus_token_id == 23
+    assert result.rejected_target_logits is None
+    assert sampler_output.sampled_token_ids.tolist() == [[-1, -1, -1]]
+    assert torch.equal(
+        sampler_output.num_sampled,
+        torch.tensor([0], device=device, dtype=torch.int32),
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires cuda")
 def test_reject_path_returns_cuda_logits_row() -> None:
     device = torch.device("cuda")
@@ -130,6 +176,52 @@ def test_reject_path_returns_cuda_logits_row() -> None:
     assert torch.equal(
         sampler_output.num_sampled,
         torch.tensor([0], device=device, dtype=torch.int32),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires cuda")
+def test_cuda_all_accept_uses_kernel_and_bonus_sampling_path() -> None:
+    device = torch.device("cuda")
+    sampler = DSSDVerifierSampler(
+        sampler=_build_fake_sampler(device),
+        num_speculative_steps=2,
+    )
+    input_batch = _build_input_batch(device)
+    logits = torch.tensor(
+        [
+            [0.0, -float("inf"), -float("inf")],
+            [-float("inf"), 0.0, -float("inf")],
+            [-float("inf"), -float("inf"), 0.0],
+        ],
+        device=device,
+        dtype=torch.float32,
+    )
+    request = VerifierRoundRequest(
+        req_id="req-1",
+        committed_token_id=7,
+        draft_token_ids=[0, 1],
+        draft_q_values=[1.0, 1.0],
+    )
+
+    sampler_output, raw_result = sampler(logits, input_batch, request)
+    result = raw_result.to_round_result()
+
+    assert raw_result.accepted_len.is_cuda
+    assert torch.equal(
+        raw_result.accepted_len,
+        torch.tensor(2, device=device, dtype=torch.int32),
+    )
+    assert raw_result.all_accepted.is_cuda
+    assert torch.equal(raw_result.all_accepted, torch.tensor(True, device=device))
+    assert result.accepted_len == 2
+    assert result.is_all_accepted()
+    assert not result.is_rejected()
+    assert result.bonus_token_id == 2
+    assert result.rejected_target_logits is None
+    assert sampler_output.sampled_token_ids.tolist() == [[0, 1, -1]]
+    assert torch.equal(
+        sampler_output.num_sampled,
+        torch.tensor([2], device=device, dtype=torch.int32),
     )
 
 
