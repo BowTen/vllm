@@ -110,7 +110,6 @@ class VerifierDecodeEngine:
             state.input_batch,
             request,
         )
-        result = raw_result.to_round_result()
 
         self.state_bridge.commit_committed_token_before_postprocess(
             session,
@@ -131,6 +130,7 @@ class VerifierDecodeEngine:
             sampler_output.num_sampled.to(device=device, dtype=torch.int32),
             draft_len - accepted_len.view(1),
         )
+        result = raw_result.to_round_result()
         self.state_bridge.set_round_result(session, result)
         return result
 
