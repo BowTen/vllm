@@ -12,7 +12,7 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 from .sampler import DSSDEdgeDraftSampler
 from .scheduler import EdgeSchedulerAdapter
-from .state_bridge import EdgeStateBridge
+from .state_bridge import EdgeStateBridge, validate_edge_sampling_params
 from .types import EdgeRoundState, EdgeSession
 
 if TYPE_CHECKING:
@@ -49,6 +49,7 @@ class EdgeDecodeEngine:
         sampling_params: SamplingParams,
         lora_request: LoRARequest | None = None,
     ) -> EdgeSession:
+        validate_edge_sampling_params(sampling_params)
         session = EdgeSession(
             req_id=req_id,
             prompt_token_ids=list(prompt_token_ids),

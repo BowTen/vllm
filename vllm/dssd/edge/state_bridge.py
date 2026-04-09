@@ -2,10 +2,30 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from vllm.sampling_params import SamplingParams
+
 from .types import EdgeSession
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+def validate_edge_sampling_params(sampling_params: SamplingParams) -> None:
+    unsupported_param = None
+    if sampling_params.presence_penalty != 0.0:
+        unsupported_param = "presence_penalty"
+    elif sampling_params.frequency_penalty != 0.0:
+        unsupported_param = "frequency_penalty"
+    elif sampling_params.repetition_penalty != 1.0:
+        unsupported_param = "repetition_penalty"
+    elif sampling_params.bad_words:
+        unsupported_param = "bad_words"
+    elif sampling_params.structured_outputs is not None:
+        unsupported_param = "structured_outputs"
+
+    if unsupported_param is not None:
+        raise ValueError(
+            f"edge state bridge does not support {unsupported_param}")
 
 
 class EdgeStateBridge:
@@ -83,20 +103,7 @@ class EdgeStateBridge:
         session.round_state.reset()
 
     def _ensure_supported_sampling_params(self, session: EdgeSession) -> None:
-        sampling_params = session.sampling_params
-        unsupported_param = None
-        if sampling_params.presence_penalty != 0.0:
-            unsupported_param = "presence_penalty"
-        elif sampling_params.frequency_penalty != 0.0:
-            unsupported_param = "frequency_penalty"
-        elif sampling_params.repetition_penalty != 1.0:
-            unsupported_param = "repetition_penalty"
-        elif sampling_params.bad_words:
-            unsupported_param = "bad_words"
-
-        if unsupported_param is not None:
-            raise ValueError(
-                f"edge state bridge does not support {unsupported_param}")
+        validate_edge_sampling_params(session.sampling_params)
 
     def _req_idx(self, session: EdgeSession, model_runner: GPUModelRunner) -> int:
         req_idx = model_runner.req_states.req_id_to_index.get(session.req_id)

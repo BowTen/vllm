@@ -5,8 +5,26 @@ import pytest
 import torch
 
 from vllm.dssd.edge import EdgeDecodeEngine
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+
+
+UNSUPPORTED_SAMPLING_CASES = [
+    (SamplingParams(max_tokens=8, presence_penalty=0.5), "presence_penalty"),
+    (SamplingParams(max_tokens=8, frequency_penalty=0.5), "frequency_penalty"),
+    (SamplingParams(max_tokens=8, repetition_penalty=1.1),
+     "repetition_penalty"),
+    (SamplingParams(max_tokens=8, bad_words=["nope"]), "bad_words"),
+    (
+        SamplingParams(
+            max_tokens=8,
+            structured_outputs=StructuredOutputsParams(
+                grammar="root ::= 'hi'",
+            ),
+        ),
+        "structured_outputs",
+    ),
+]
 
 
 class FakeAsyncOutput(AsyncModelRunnerOutput):
@@ -261,6 +279,34 @@ def test_open_prefill_commit_external_rollback_and_close_session() -> None:
     assert "req-1" not in engine.sessions
     assert state_bridge.clear_calls[-1] is session
     assert session.round_state.draft_token_ids == []
+
+
+@pytest.mark.parametrize(("sampling_params", "expected_message"),
+                         UNSUPPORTED_SAMPLING_CASES)
+def test_open_session_rejects_unsupported_sampling_params_before_side_effects(
+    sampling_params: SamplingParams,
+    expected_message: str,
+) -> None:
+    engine, worker, scheduler, state_bridge, _draft_sampler, _model_runner = (
+        make_engine())
+
+    with pytest.raises(ValueError, match=expected_message):
+        engine.open_session(
+            req_id="req-1",
+            prompt_token_ids=[10, 11],
+            sampling_params=sampling_params,
+        )
+
+    assert scheduler.allocate_calls == []
+    assert worker.execute_calls == []
+    assert worker.sample_tokens_calls == 0
+    assert engine.sessions == {}
+    assert state_bridge.bootstrap_calls == []
+    assert state_bridge.prepare_calls == []
+    assert state_bridge.inject_calls == []
+    assert state_bridge.rollback_calls == []
+    assert state_bridge.clear_calls == []
+    assert state_bridge.commit_calls == []
 
 
 def test_execute_normalizes_async_and_sync_outputs() -> None:

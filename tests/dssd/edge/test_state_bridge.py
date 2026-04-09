@@ -2,10 +2,28 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from vllm.dssd.edge.state_bridge import EdgeStateBridge
 from vllm.dssd.edge.types import EdgeSession
+
+
+UNSUPPORTED_SAMPLING_CASES = [
+    (SamplingParams(max_tokens=8, presence_penalty=0.5), "presence_penalty"),
+    (SamplingParams(max_tokens=8, frequency_penalty=0.5), "frequency_penalty"),
+    (SamplingParams(max_tokens=8, repetition_penalty=1.1),
+     "repetition_penalty"),
+    (SamplingParams(max_tokens=8, bad_words=["nope"]), "bad_words"),
+    (
+        SamplingParams(
+            max_tokens=8,
+            structured_outputs=StructuredOutputsParams(
+                grammar="root ::= 'hi'",
+            ),
+        ),
+        "structured_outputs",
+    ),
+]
 
 
 class FakeTensorField:
@@ -68,18 +86,8 @@ def make_session(
     )
 
 
-@pytest.mark.parametrize(
-    ("sampling_params", "expected_message"),
-    [
-        (SamplingParams(max_tokens=8, presence_penalty=0.5),
-         "presence_penalty"),
-        (SamplingParams(max_tokens=8, frequency_penalty=0.5),
-         "frequency_penalty"),
-        (SamplingParams(max_tokens=8, repetition_penalty=1.1),
-         "repetition_penalty"),
-        (SamplingParams(max_tokens=8, bad_words=["nope"]), "bad_words"),
-    ],
-)
+@pytest.mark.parametrize(("sampling_params", "expected_message"),
+                         UNSUPPORTED_SAMPLING_CASES)
 def test_bootstrap_rejects_unsupported_sampling_params(
     sampling_params: SamplingParams,
     expected_message: str,
@@ -92,18 +100,8 @@ def test_bootstrap_rejects_unsupported_sampling_params(
         bridge.bootstrap_first_token(session, 20, model_runner)
 
 
-@pytest.mark.parametrize(
-    ("sampling_params", "expected_message"),
-    [
-        (SamplingParams(max_tokens=8, presence_penalty=0.5),
-         "presence_penalty"),
-        (SamplingParams(max_tokens=8, frequency_penalty=0.5),
-         "frequency_penalty"),
-        (SamplingParams(max_tokens=8, repetition_penalty=1.1),
-         "repetition_penalty"),
-        (SamplingParams(max_tokens=8, bad_words=["nope"]), "bad_words"),
-    ],
-)
+@pytest.mark.parametrize(("sampling_params", "expected_message"),
+                         UNSUPPORTED_SAMPLING_CASES)
 def test_rollback_rejects_unsupported_sampling_params(
     sampling_params: SamplingParams,
     expected_message: str,
