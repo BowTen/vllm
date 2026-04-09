@@ -76,10 +76,12 @@ def test_all_accept_keeps_bonus_token_as_bypass_result(monkeypatch) -> None:
     )
     assert torch.equal(raw_result.all_accepted, torch.tensor(True, device=device))
     assert result.accepted_len == 2
+    assert isinstance(result.accepted_len, int)
     assert result.is_all_accepted()
     assert not result.is_rejected()
     assert result.rejected_target_logits is None
-    assert torch.equal(result.bonus_token_id, torch.tensor(17, device=device))
+    assert result.bonus_token_id == 17
+    assert isinstance(result.bonus_token_id, int)
     assert sampler_output.sampled_token_ids.tolist() == [[0, 1, -1]]
     assert torch.equal(
         sampler_output.num_sampled,
@@ -117,6 +119,7 @@ def test_reject_path_returns_cuda_logits_row() -> None:
     assert raw_result.all_accepted.is_cuda
     assert torch.equal(raw_result.all_accepted, torch.tensor(False, device=device))
     assert result.accepted_len == 0
+    assert isinstance(result.accepted_len, int)
     assert result.bonus_token_id is None
     assert result.is_rejected()
     assert not result.is_all_accepted()

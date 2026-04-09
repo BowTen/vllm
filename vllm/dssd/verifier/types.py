@@ -25,8 +25,8 @@ class VerifierRoundRequest:
 @dataclass
 class VerifierRoundResult:
     req_id: str
-    accepted_len: int | torch.Tensor
-    bonus_token_id: int | torch.Tensor | None = None
+    accepted_len: int
+    bonus_token_id: int | None = None
     rejected_target_logits: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
@@ -58,7 +58,7 @@ class VerifierSamplerRoundResult:
             return VerifierRoundResult(
                 req_id=self.req_id,
                 accepted_len=accepted_len,
-                bonus_token_id=self.bonus_token_id,
+                bonus_token_id=int(self.bonus_token_id.item()),
             )
         return VerifierRoundResult(
             req_id=self.req_id,
