@@ -14,6 +14,11 @@ from .types import EdgeSession
 
 
 class EdgeSchedulerAdapter:
+    """Adapter for the first-pass single-request, decoder-only text path.
+
+    This edge path does not handle multimodal or encoder inputs.
+    """
+
     def __init__(self, kv_cache_manager: KVCacheManager | None = None) -> None:
         self.kv_cache_manager = kv_cache_manager
 

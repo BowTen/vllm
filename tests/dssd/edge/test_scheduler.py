@@ -51,7 +51,8 @@ def make_session() -> EdgeSession:
 
 
 def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
-    adapter = EdgeSchedulerAdapter(FakeKVCacheManager())
+    kv = FakeKVCacheManager()
+    adapter = EdgeSchedulerAdapter(kv)
     session = make_session()
 
     block_ids = adapter.allocate_blocks(
@@ -62,12 +63,30 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     prefill = adapter.build_prefill_step(session)
     decode = adapter.build_decode_step(session)
 
+    prefill_request, prefill_num_new_tokens = kv.allocate_calls[0]
+    decode_request, decode_num_new_tokens = kv.allocate_calls[1]
+
     assert block_ids == ([7, 8],)
+    assert len(kv.allocate_calls) == 2
+    assert prefill_num_new_tokens == len(session.prompt_token_ids)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
     assert prefill.new_block_ids_to_zero == [41, 42]
+    assert decode_num_new_tokens == 1
+    assert decode_num_new_tokens == (
+        decode_request.num_tokens - decode_request.num_computed_tokens
+    )
+    assert list(decode_request.output_token_ids) == session.token_ids[
+        session.prompt_len:
+    ]
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
     assert decode.new_block_ids_to_zero == [51, 52]
+
+
+def test_scheduler_adapter_scope_is_documented() -> None:
+    assert EdgeSchedulerAdapter.__doc__ is not None
+    assert "single-request" in EdgeSchedulerAdapter.__doc__
+    assert "decoder-only text path" in EdgeSchedulerAdapter.__doc__
 
 
 def test_close_step_and_free_blocks() -> None:
