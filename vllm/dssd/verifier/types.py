@@ -30,11 +30,11 @@ class VerifierRoundResult:
     rejected_step: int | None = None
     rejected_target_logits: torch.Tensor | None = None
 
-    def is_all_accepted(self, draft_len: int) -> bool:
-        return self.accepted_len == draft_len
+    def is_all_accepted(self) -> bool:
+        return self.rejected_step is None
 
-    def is_rejected(self, draft_len: int) -> bool:
-        return self.accepted_len < draft_len
+    def is_rejected(self) -> bool:
+        return self.rejected_step is not None
 
 
 @dataclass
