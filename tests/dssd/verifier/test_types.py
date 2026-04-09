@@ -6,7 +6,17 @@ from unittest.mock import patch
 import pytest
 
 
-def _load_verifier_modules(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def _make_stub_module(module_name: str, **attrs: object) -> ModuleType:
+    module = ModuleType(module_name)
+    for attr_name, value in attrs.items():
+        setattr(module, attr_name, value)
+    return module
+
+
+def _load_verifier_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_modules: dict[str, ModuleType] | None = None,
+) -> SimpleNamespace:
     repo_root = Path(__file__).resolve().parents[3]
     vllm_dir = repo_root / "vllm"
 
@@ -29,6 +39,7 @@ def _load_verifier_modules(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     vllm_package = ModuleType("vllm")
     vllm_package.__path__ = [str(vllm_dir)]
+    extra_modules = extra_modules or {}
 
     monkeypatch.syspath_prepend(str(repo_root))
     with patch.dict(
@@ -37,6 +48,7 @@ def _load_verifier_modules(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 "vllm": vllm_package,
                 "vllm.lora.request": lora_request_module,
                 "vllm.sampling_params": sampling_params_module,
+                **extra_modules,
             }):
         for module_name in (
                 "vllm.dssd",
@@ -73,12 +85,78 @@ def test_package_exports_verifier_types(
     assert verifier_package.VerifierRoundState is (
         verifier_modules.VerifierRoundState)
     assert verifier_package.__all__ == [
+        "DSSDVerifierSampler",
+        "VerifierDecodeEngine",
         "VerifierOpenSessionResult",
         "VerifierRoundRequest",
         "VerifierRoundResult",
         "VerifierRoundState",
+        "VerifierSchedulerAdapter",
         "VerifierSession",
+        "VerifierStateBridge",
     ]
+
+
+def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    sampler_class = type("DSSDVerifierSampler", (), {})
+    engine_class = type("VerifierDecodeEngine", (), {})
+    scheduler_class = type("VerifierSchedulerAdapter", (), {})
+    bridge_class = type("VerifierStateBridge", (), {})
+    extra_modules = {
+        "vllm.dssd.verifier.engine": _make_stub_module(
+            "vllm.dssd.verifier.engine",
+            VerifierDecodeEngine=engine_class,
+        ),
+        "vllm.dssd.verifier.sampler": _make_stub_module(
+            "vllm.dssd.verifier.sampler",
+            DSSDVerifierSampler=sampler_class,
+        ),
+        "vllm.dssd.verifier.scheduler": _make_stub_module(
+            "vllm.dssd.verifier.scheduler",
+            VerifierSchedulerAdapter=scheduler_class,
+        ),
+        "vllm.dssd.verifier.state_bridge": _make_stub_module(
+            "vllm.dssd.verifier.state_bridge",
+            VerifierStateBridge=bridge_class,
+        ),
+    }
+    verifier_modules = _load_verifier_modules(
+        monkeypatch,
+        extra_modules=extra_modules,
+    )
+
+    with patch.dict("sys.modules", extra_modules):
+        (
+            DSSDVerifierSampler,
+            VerifierDecodeEngine,
+            VerifierOpenSessionResult,
+            VerifierRoundRequest,
+            VerifierRoundResult,
+            VerifierRoundState,
+            VerifierSchedulerAdapter,
+            VerifierSession,
+            VerifierStateBridge,
+        ) = (
+            verifier_modules.verifier_package.DSSDVerifierSampler,
+            verifier_modules.verifier_package.VerifierDecodeEngine,
+            verifier_modules.verifier_package.VerifierOpenSessionResult,
+            verifier_modules.verifier_package.VerifierRoundRequest,
+            verifier_modules.verifier_package.VerifierRoundResult,
+            verifier_modules.verifier_package.VerifierRoundState,
+            verifier_modules.verifier_package.VerifierSchedulerAdapter,
+            verifier_modules.verifier_package.VerifierSession,
+            verifier_modules.verifier_package.VerifierStateBridge,
+        )
+
+    assert DSSDVerifierSampler is sampler_class
+    assert VerifierDecodeEngine is engine_class
+    assert VerifierOpenSessionResult is verifier_modules.VerifierOpenSessionResult
+    assert VerifierRoundRequest is verifier_modules.VerifierRoundRequest
+    assert VerifierRoundResult is verifier_modules.VerifierRoundResult
+    assert VerifierRoundState is verifier_modules.VerifierRoundState
+    assert VerifierSchedulerAdapter is scheduler_class
+    assert VerifierSession is verifier_modules.VerifierSession
+    assert VerifierStateBridge is bridge_class
 
 
 def test_round_request_validate_checks_lengths_and_gamma(
