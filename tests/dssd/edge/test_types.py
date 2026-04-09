@@ -1,8 +1,11 @@
 import torch
 
+from vllm.dssd.edge import (EdgeOpenSessionResult as ExportedEdgeOpenSessionResult,
+                            EdgeRoundState as ExportedEdgeRoundState,
+                            EdgeSession as ExportedEdgeSession)
 from vllm.sampling_params import SamplingParams
 
-from vllm.dssd.edge.types import EdgeRoundState, EdgeSession
+from vllm.dssd.edge.types import EdgeOpenSessionResult, EdgeRoundState, EdgeSession
 
 
 def test_edge_session_append_and_rollback() -> None:
@@ -73,6 +76,29 @@ def test_edge_round_state_prepare_logits_buffer_reuses_matching_buffer() -> None
     assert round_state.draft_logits_buffer is buffer
 
 
+def test_edge_round_state_reset_preserves_matching_buffer_reuse() -> None:
+    round_state = EdgeRoundState()
+    round_state.prepare_logits_buffer(
+        gamma=2,
+        vocab_size=4,
+        device="cpu",
+        dtype=torch.float16,
+    )
+    buffer = round_state.draft_logits_buffer
+    round_state.append_step(7, 0.25)
+    round_state.committed_token_id = 9
+
+    round_state.reset()
+    round_state.prepare_logits_buffer(
+        gamma=2,
+        vocab_size=4,
+        device="cpu",
+        dtype=torch.float16,
+    )
+
+    assert round_state.draft_logits_buffer is buffer
+
+
 def test_edge_round_state_q_dist_at_returns_logits_vector() -> None:
     round_state = EdgeRoundState()
     round_state.prepare_logits_buffer(
@@ -123,3 +149,16 @@ def test_edge_session_rollback_keeps_prompt_tokens() -> None:
     assert session.total_len == 2
     assert session.output_len == 0
     assert session.num_computed_tokens == 2
+
+
+def test_edge_open_session_result_and_edge_re_exports() -> None:
+    result = ExportedEdgeOpenSessionResult(
+        req_id="req-4",
+        bootstrap_token_id=42,
+    )
+
+    assert ExportedEdgeOpenSessionResult is EdgeOpenSessionResult
+    assert ExportedEdgeRoundState is EdgeRoundState
+    assert ExportedEdgeSession is EdgeSession
+    assert result.req_id == "req-4"
+    assert result.bootstrap_token_id == 42
