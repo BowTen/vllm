@@ -241,7 +241,6 @@ def test_set_round_result_only_commits_accepted_prefix() -> None:
     result = VerifierRoundResult(
         req_id="req-1",
         accepted_len=2,
-        rejected_step=2,
         rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
     )
 
@@ -273,7 +272,11 @@ def test_set_round_result_requires_committed_token_to_be_committed_first() -> No
     with pytest.raises(ValueError, match="committed token must be committed"):
         bridge.set_round_result(
             session,
-            VerifierRoundResult(req_id="req-1", accepted_len=1),
+            VerifierRoundResult(
+                req_id="req-1",
+                accepted_len=1,
+                rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
+            ),
         )
 
 
@@ -309,17 +312,29 @@ def test_set_round_result_rejects_invalid_round_metadata() -> None:
     with pytest.raises(ValueError, match="session and round req_id"):
         bridge.set_round_result(
             session,
-            VerifierRoundResult(req_id="req-2", accepted_len=1),
+            VerifierRoundResult(
+                req_id="req-2",
+                accepted_len=1,
+                rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
+            ),
         )
 
     with pytest.raises(ValueError, match="accepted_len"):
         bridge.set_round_result(
             session,
-            VerifierRoundResult(req_id="req-1", accepted_len=4),
+            VerifierRoundResult(
+                req_id="req-1",
+                accepted_len=4,
+                rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
+            ),
         )
 
     with pytest.raises(ValueError, match="accepted_len"):
         bridge.set_round_result(
             session,
-            VerifierRoundResult(req_id="req-1", accepted_len=-1),
+            VerifierRoundResult(
+                req_id="req-1",
+                accepted_len=-1,
+                rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
+            ),
         )

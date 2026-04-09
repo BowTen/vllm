@@ -130,7 +130,7 @@ def test_session_output_len_clamps_to_zero(
     assert session.output_len == 0
 
 
-def test_round_result_helpers_match_acceptance_shape(
+def test_round_result_helpers_match_bypass_payload_shape(
         verifier_modules: SimpleNamespace) -> None:
     result = verifier_modules.VerifierRoundResult(req_id="req-1",
                                                   accepted_len=2,
@@ -140,13 +140,27 @@ def test_round_result_helpers_match_acceptance_shape(
 
     rejected = verifier_modules.VerifierRoundResult(req_id="req-1",
                                                     accepted_len=1,
-                                                    rejected_step=1)
+                                                    rejected_target_logits=object())
     assert not rejected.is_all_accepted()
     assert rejected.is_rejected()
 
     bootstrap = verifier_modules.VerifierOpenSessionResult(
         req_id="req-1", bootstrap_token_id=7)
     assert bootstrap.bootstrap_token_id == 7
+
+
+def test_round_result_requires_exactly_one_bypass_payload(
+        verifier_modules: SimpleNamespace) -> None:
+    with pytest.raises(ValueError, match="exactly one bypass payload"):
+        verifier_modules.VerifierRoundResult(req_id="req-1", accepted_len=0)
+
+    with pytest.raises(ValueError, match="exactly one bypass payload"):
+        verifier_modules.VerifierRoundResult(
+            req_id="req-1",
+            accepted_len=1,
+            bonus_token_id=17,
+            rejected_target_logits=object(),
+        )
 
 
 def test_round_state_reset_clears_round_tracking(

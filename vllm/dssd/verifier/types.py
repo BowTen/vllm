@@ -25,16 +25,46 @@ class VerifierRoundRequest:
 @dataclass
 class VerifierRoundResult:
     req_id: str
-    accepted_len: int
-    bonus_token_id: int | None = None
-    rejected_step: int | None = None
+    accepted_len: int | torch.Tensor
+    bonus_token_id: int | torch.Tensor | None = None
     rejected_target_logits: torch.Tensor | None = None
 
+    def __post_init__(self) -> None:
+        has_bonus = self.bonus_token_id is not None
+        has_reject_logits = self.rejected_target_logits is not None
+        if has_bonus == has_reject_logits:
+            raise ValueError(
+                "VerifierRoundResult requires exactly one bypass payload"
+            )
+
     def is_all_accepted(self) -> bool:
-        return self.rejected_step is None
+        return self.bonus_token_id is not None
 
     def is_rejected(self) -> bool:
-        return self.rejected_step is not None
+        return self.rejected_target_logits is not None
+
+
+@dataclass
+class VerifierSamplerRoundResult:
+    req_id: str
+    accepted_len: torch.Tensor
+    all_accepted: torch.Tensor
+    bonus_token_id: torch.Tensor
+    rejected_target_logits: torch.Tensor
+
+    def to_round_result(self) -> VerifierRoundResult:
+        accepted_len = int(self.accepted_len.item())
+        if bool(self.all_accepted.item()):
+            return VerifierRoundResult(
+                req_id=self.req_id,
+                accepted_len=accepted_len,
+                bonus_token_id=self.bonus_token_id,
+            )
+        return VerifierRoundResult(
+            req_id=self.req_id,
+            accepted_len=accepted_len,
+            rejected_target_logits=self.rejected_target_logits,
+        )
 
 
 @dataclass
