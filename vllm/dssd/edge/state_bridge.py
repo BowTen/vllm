@@ -62,6 +62,7 @@ class EdgeStateBridge:
         rejected_count: int,
         model_runner: GPUModelRunner,
     ) -> None:
+        self._ensure_supported_sampling_params(session)
         if rejected_count <= 0:
             return
 

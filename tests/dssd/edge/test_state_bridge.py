@@ -92,6 +92,42 @@ def test_bootstrap_rejects_unsupported_sampling_params(
         bridge.bootstrap_first_token(session, 20, model_runner)
 
 
+@pytest.mark.parametrize(
+    ("sampling_params", "expected_message"),
+    [
+        (SamplingParams(max_tokens=8, presence_penalty=0.5),
+         "presence_penalty"),
+        (SamplingParams(max_tokens=8, frequency_penalty=0.5),
+         "frequency_penalty"),
+        (SamplingParams(max_tokens=8, repetition_penalty=1.1),
+         "repetition_penalty"),
+        (SamplingParams(max_tokens=8, bad_words=["nope"]), "bad_words"),
+    ],
+)
+def test_rollback_rejects_unsupported_sampling_params(
+    sampling_params: SamplingParams,
+    expected_message: str,
+) -> None:
+    bridge = EdgeStateBridge()
+    session = make_session(sampling_params)
+    session.token_ids = [10, 11, 20, 30]
+    session.total_len = 4
+    session.num_computed_tokens = 3
+    req_states = FakeReqStates()
+    model_runner = SimpleNamespace(req_states=req_states)
+
+    with pytest.raises(ValueError, match=expected_message):
+        bridge.rollback(session, 1, model_runner)
+
+    assert session.token_ids == [10, 11, 20, 30]
+    assert session.total_len == 4
+    assert session.num_computed_tokens == 3
+    assert int(req_states.last_sampled_tokens[0, 0]) == 0
+    assert req_states.total_len.values == [2]
+    assert req_states.num_computed_tokens.values == [2]
+    assert req_states.apply_calls == 0
+
+
 def test_bootstrap_and_external_commit_write_req_state() -> None:
     bridge = EdgeStateBridge()
     session = make_session()
