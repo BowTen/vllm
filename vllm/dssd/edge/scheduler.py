@@ -60,7 +60,7 @@ class EdgeSchedulerAdapter:
         self._pending_prefill_new_block_ids_to_zero[req_id] = (
             self._take_new_block_ids_to_zero()
         )
-        return new_blocks.get_block_ids(allow_none=True)
+        return new_blocks.get_block_ids(allow_none=False)
 
     def build_prefill_step(self, session: EdgeSession) -> SchedulerOutput:
         prompt_len = len(session.prompt_token_ids)

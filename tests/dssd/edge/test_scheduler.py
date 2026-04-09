@@ -9,6 +9,8 @@ class FakeBlocks:
         self._block_ids = block_ids
 
     def get_block_ids(self, allow_none=True):
+        if not allow_none and self._block_ids is None:
+            return ([],)
         return self._block_ids
 
 
@@ -97,6 +99,23 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
     assert decode.scheduled_cached_reqs.new_block_ids == [([7, 8],)]
     assert decode.new_block_ids_to_zero == [51, 52]
+
+
+def test_allocate_blocks_returns_concrete_empty_shape_for_prefill() -> None:
+    kv = FakeKVCacheManager(
+        allocated_block_ids=(None,),
+        new_block_id_batches=([],),
+    )
+    adapter = EdgeSchedulerAdapter(kv)
+
+    block_ids = adapter.allocate_blocks(
+        req_id="req-1",
+        prompt_token_ids=[10, 11],
+        sampling_params=SamplingParams(max_tokens=8),
+    )
+
+    assert block_ids is not None
+    assert block_ids == ([],)
 
 
 def test_request_block_hasher_is_threaded_into_built_requests() -> None:
