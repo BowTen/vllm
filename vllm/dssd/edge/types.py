@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 
@@ -27,8 +28,14 @@ class EdgeRoundState:
         dtype: torch.dtype | None,
     ) -> None:
         actual_dtype = torch.float32 if dtype is None else dtype
+        expected_shape = (gamma, vocab_size)
+        if self.draft_logits_buffer is not None:
+            if (self.draft_logits_buffer.shape == expected_shape
+                    and self.draft_logits_buffer.dtype == actual_dtype
+                    and self.draft_logits_buffer.device == torch.device(device)):
+                return
         self.draft_logits_buffer = torch.empty(
-            (gamma, vocab_size),
+            expected_shape,
             dtype=actual_dtype,
             device=device,
         )
@@ -42,6 +49,9 @@ class EdgeRoundState:
         self.draft_token_ids.append(int(token_id))
         self.draft_q_values.append(float(q_value))
 
+    def q_dist_at(self, index: int) -> torch.Tensor:
+        return self.logits_row_view(index)
+
 
 @dataclass
 class EdgeSession:
@@ -53,6 +63,8 @@ class EdgeSession:
     num_computed_tokens: int = 0
     total_len: int = 0
     token_ids: list[int] = field(default_factory=list)
+    lora_request: LoRARequest | None = None
+    round_state: EdgeRoundState = field(default_factory=EdgeRoundState)
 
     @property
     def output_len(self) -> int:
@@ -66,7 +78,8 @@ class EdgeSession:
     def rollback(self, count: int) -> None:
         if count <= 0:
             return
-        self.token_ids = self.token_ids[: max(0, len(self.token_ids) - count)]
+        kept_len = max(self.prompt_len, len(self.token_ids) - count)
+        self.token_ids = self.token_ids[:kept_len]
         self.total_len = len(self.token_ids)
         self.num_computed_tokens = max(
             self.prompt_len,
