@@ -1,6 +1,4 @@
-"""DSSD experimental modules for local prototype work."""
-
-from .protocol import (
+from .types import (
     CloseSessionAck,
     CloseSessionRequest,
     OpenSessionRequest,
