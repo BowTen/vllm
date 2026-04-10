@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-
-from tests.utils import create_new_process_for_each_test
 from vllm.dssd.verifier.engine import VerifierDecodeEngine
 from vllm.dssd.verifier.sampler import DSSDVerifierSampler
 from vllm.dssd.verifier.scheduler import VerifierSchedulerAdapter
@@ -14,7 +12,6 @@ from vllm.sampling_params import SamplingParams
 
 @pytest.mark.skipif(not pytest.importorskip("torch").cuda.is_available(),
                     reason="requires cuda")
-@create_new_process_for_each_test()
 def test_open_verify_close_smoke(real_worker) -> None:
     worker, vllm_config, kv_cache_manager = real_worker
     sampler = DSSDVerifierSampler(
