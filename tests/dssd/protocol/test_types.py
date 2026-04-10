@@ -90,6 +90,14 @@ def test_verify_round_response_requires_exactly_one_bypass_payload(
     with pytest.raises(ValueError, match="exactly one bypass payload"):
         protocol_modules.VerifyRoundResponse(req_id="r", accepted_len=0)
 
+    with pytest.raises(ValueError, match="exactly one bypass payload"):
+        protocol_modules.VerifyRoundResponse(
+            req_id="r",
+            accepted_len=0,
+            bonus_token_id=7,
+            rejected_target_logits=object(),
+        )
+
 
 def test_protocol_package_exports_are_stable(
         protocol_modules: SimpleNamespace) -> None:
