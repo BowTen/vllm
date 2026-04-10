@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import torch
+if TYPE_CHECKING:
+    import torch
 
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
+    from vllm.lora.request import LoRARequest
+    from vllm.sampling_params import SamplingParams
 
 
 @dataclass
@@ -28,6 +30,12 @@ class VerifyRoundRequest:
     committed_token_id: int
     draft_token_ids: list[int]
     draft_q_values: list[float]
+
+    def validate(self, gamma: int) -> None:
+        if len(self.draft_token_ids) != len(self.draft_q_values):
+            raise ValueError("draft_token_ids 和 draft_q_values 长度不一致")
+        if len(self.draft_token_ids) > gamma:
+            raise ValueError("draft 长度超过固定 gamma")
 
 
 @dataclass
