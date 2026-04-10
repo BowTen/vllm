@@ -83,7 +83,6 @@ def test_extract_q_value_uses_processed_logits_probability() -> None:
 def test_helper_tensor_builders_return_edge_shapes_on_cpu() -> None:
     edge_sampler = DSSDEdgeDraftSampler(FakeSampler())
     device = torch.device("cpu")
-
     sampled_tokens = edge_sampler.build_sampled_tokens(17, device)
     num_sampled = edge_sampler.build_num_sampled(device)
     num_rejected = edge_sampler.build_num_rejected(device)
@@ -95,8 +94,6 @@ def test_helper_tensor_builders_return_edge_shapes_on_cpu() -> None:
     assert num_sampled.tolist() == [1]
     assert num_rejected.dtype == torch.int32
     assert num_rejected.tolist() == [0]
-
-
 def test_apply_sampling_params_into_reuses_destination_buffer() -> None:
     base_sampler = FakeSampler()
     edge_sampler = DSSDEdgeDraftSampler(base_sampler)

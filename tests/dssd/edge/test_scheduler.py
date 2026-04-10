@@ -217,3 +217,23 @@ def test_free_blocks_clears_pending_prefill_zeroing_metadata() -> None:
 
     assert prefill.new_block_ids_to_zero is None
     assert kv.take_new_block_ids() == [99]
+
+
+def test_decode_step_allocates_one_new_token_for_fully_computed_prefix() -> None:
+    kv = FakeKVCacheManager()
+    adapter = EdgeSchedulerAdapter(kv)
+    session = make_session()
+    session.num_computed_tokens = len(session.token_ids)
+
+    adapter.allocate_blocks(
+        req_id=session.req_id,
+        prompt_token_ids=session.prompt_token_ids,
+        sampling_params=session.sampling_params,
+    )
+    adapter.build_decode_step(session)
+
+    decode_request, decode_num_new_tokens = kv.allocate_calls[1]
+
+    assert decode_request.num_tokens == len(session.token_ids)
+    assert decode_request.num_computed_tokens == len(session.token_ids)
+    assert decode_num_new_tokens == 1

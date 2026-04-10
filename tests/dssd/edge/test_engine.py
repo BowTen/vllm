@@ -427,3 +427,98 @@ def test_sample_with_draft_sampler_requires_execute_model_state() -> None:
 
     with pytest.raises(RuntimeError, match="execute_model"):
         engine._sample_with_draft_sampler(session, torch.empty((1, 4)))
+
+
+def test_generate_local_runs_prefill_bootstrap_and_decode_loop() -> None:
+    engine, worker, scheduler, state_bridge, _draft_sampler, model_runner = (
+        make_engine())
+    sampling_params = SamplingParams(max_tokens=3)
+    worker.outputs = [
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    ]
+    execute_states = [
+        make_execute_model_state(
+            torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
+        ),
+        make_execute_model_state(
+            torch.tensor([[5.0, 6.0, 7.0, 8.0]], dtype=torch.float32)
+        ),
+        make_execute_model_state(
+            torch.tensor([[9.0, 10.0, 11.0, 12.0]], dtype=torch.float32)
+        ),
+    ]
+    original_execute = worker.execute_model
+
+    def execute_model_with_state(step):
+        next_index = len(worker.execute_calls)
+        model_runner.execute_model_state = (
+            execute_states[next_index]
+            if next_index < len(execute_states)
+            else None
+        )
+        return original_execute(step)
+
+    worker.execute_model = execute_model_with_state
+
+    output_token_ids = engine.generate_local(
+        req_id="req-1",
+        prompt_token_ids=[10, 11],
+        sampling_params=sampling_params,
+    )
+
+    assert output_token_ids == [13, 14, 15]
+    assert worker.execute_calls == [
+        ("prefill", "req-1"),
+        ("decode", "req-1", 1),
+        ("decode", "req-1", 2),
+        ("close", "req-1"),
+    ]
+    assert scheduler.prefill_calls[0].req_id == "req-1"
+    assert [call[1] for call in state_bridge.commit_calls] == [13, 14, 15]
+    assert state_bridge.bootstrap_calls == []
+    assert worker.sample_tokens_calls == 0
+    assert "req-1" not in engine.sessions
+
+
+def test_generate_local_stops_on_eos_after_local_bootstrap() -> None:
+    engine, worker, _scheduler, state_bridge, _draft_sampler, model_runner = (
+        make_engine())
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params._eos_token_id = 13
+    worker.outputs = [
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+    ]
+    execute_states = [
+        make_execute_model_state(
+            torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
+        ),
+    ]
+    original_execute = worker.execute_model
+
+    def execute_model_with_state(step):
+        next_index = len(worker.execute_calls)
+        model_runner.execute_model_state = (
+            execute_states[next_index]
+            if next_index < len(execute_states)
+            else None
+        )
+        return original_execute(step)
+
+    worker.execute_model = execute_model_with_state
+
+    output_token_ids = engine.generate_local(
+        req_id="req-1",
+        prompt_token_ids=[10, 11],
+        sampling_params=sampling_params,
+    )
+
+    assert output_token_ids == [13]
+    assert worker.execute_calls == [
+        ("prefill", "req-1"),
+        ("close", "req-1"),
+    ]
+    assert [call[1] for call in state_bridge.commit_calls] == [13]

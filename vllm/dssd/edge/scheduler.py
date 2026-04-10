@@ -187,7 +187,12 @@ class EdgeSchedulerAdapter:
             return None
 
         request = self._build_decode_request(session)
-        num_new_tokens = request.num_tokens - request.num_computed_tokens
+        # Edge decode always schedules a single query token. By the time we
+        # reach this path, `request.num_tokens` already reflects the committed
+        # prefix, so `request.num_tokens - request.num_computed_tokens` can be
+        # zero for a normal decode step. We still need one new KV slot for the
+        # next token to be computed.
+        num_new_tokens = 1
         new_blocks = self.kv_cache_manager.allocate_slots(
             request=request,
             num_new_tokens=num_new_tokens,
