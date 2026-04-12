@@ -37,6 +37,7 @@ class VerifierDecodeEngine:
         self.scheduler = scheduler
         self.state_bridge = state_bridge
         self.verifier_sampler = verifier_sampler
+        self._configure_external_draft_mode_if_needed()
         self.gamma = self._resolve_fixed_gamma()
         self.sessions: dict[str, VerifierSession] = {}
 
@@ -150,6 +151,44 @@ class VerifierDecodeEngine:
                 "and model_runner"
             )
         return runner_gamma
+
+    def _configure_external_draft_mode_if_needed(self) -> None:
+        runner_gamma = self.model_runner.num_speculative_steps
+        sampler_gamma = self.verifier_sampler.num_speculative_steps
+        if runner_gamma == sampler_gamma or sampler_gamma <= 0:
+            return
+        if runner_gamma != 0 or self.vllm_config.speculative_config is not None:
+            return
+        if self.model_runner.cudagraph_manager.needs_capture():
+            raise NotImplementedError(
+                "external draft verifier mode currently requires eager execution"
+            )
+
+        req_states = self.model_runner.req_states
+        req_states.num_speculative_steps = sampler_gamma
+        req_states.draft_tokens = torch.zeros(
+            (req_states.max_num_reqs, sampler_gamma),
+            dtype=torch.int64,
+            device=self.model_runner.device,
+        )
+        if req_states.draft_logits is not None:
+            req_states.draft_logits = torch.zeros(
+                (
+                    req_states.max_num_reqs,
+                    sampler_gamma,
+                    req_states.vocab_size,
+                ),
+                dtype=req_states.draft_logits.dtype,
+                device=self.model_runner.device,
+            )
+
+        self.model_runner.num_speculative_steps = sampler_gamma
+        self.model_runner.decode_query_len = sampler_gamma + 1
+        self.model_runner.cudagraph_manager.decode_query_len = sampler_gamma + 1
+        if self.model_runner.sampler is not None:
+            self.model_runner.sampler.num_speculative_tokens = sampler_gamma + 1
+        if self.model_runner.rejection_sampler is not None:
+            self.model_runner.rejection_sampler.num_speculative_steps = sampler_gamma
 
     def _execute(self, scheduler_output: SchedulerOutput) -> Any | None:
         output = self.worker.execute_model(scheduler_output)
