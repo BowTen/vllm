@@ -86,11 +86,15 @@ def build_real_verifier_service(args):
     sampler = runtime.worker.model_runner.sampler
     if sampler is None:
         raise RuntimeError("real verifier runtime requires a sampler")
+    block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
     verifier_engine = VerifierDecodeEngine(
         vllm_config=runtime.vllm_config,
         worker=runtime.worker,
-        scheduler=VerifierSchedulerAdapter(kv_cache_manager=runtime.kv_cache_manager),
+        scheduler=VerifierSchedulerAdapter(
+            kv_cache_manager=runtime.kv_cache_manager,
+            request_block_hasher=block_hasher,
+        ),
         state_bridge=VerifierStateBridge(),
         verifier_sampler=DSSDVerifierSampler(
             sampler=sampler,
@@ -108,11 +112,15 @@ def build_real_edge_service(args):
     sampler = runtime.worker.model_runner.sampler
     if sampler is None:
         raise RuntimeError("real edge runtime requires a sampler")
+    block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
     edge_engine = EdgeDecodeEngine(
         vllm_config=runtime.vllm_config,
         worker=runtime.worker,
-        scheduler=EdgeSchedulerAdapter(kv_cache_manager=runtime.kv_cache_manager),
+        scheduler=EdgeSchedulerAdapter(
+            kv_cache_manager=runtime.kv_cache_manager,
+            request_block_hasher=block_hasher,
+        ),
         state_bridge=EdgeStateBridge(),
         draft_sampler=DSSDEdgeDraftSampler(sampler),
     )
@@ -143,6 +151,8 @@ def _init_real_runtime(args) -> tuple[SimpleNamespace, Callable[[], None]]:
             kv_cache_memory_bytes=args.kv_cache_memory_bytes,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_seqs=args.max_num_seqs,
+            enable_prefix_caching=False,
+            disable_log_stats=True,
         )
         vllm_config = engine_args.create_engine_config()
         with tempfile.NamedTemporaryFile() as tmp_file, set_current_vllm_config(
@@ -224,6 +234,21 @@ def _make_standalone_cleanup(worker) -> Callable[[], None]:
         envs.disable_envs_cache()
 
     return cleanup
+
+
+def _make_request_block_hasher(vllm_config):
+    from vllm.utils.hashing import get_hash_fn_by_name
+    from vllm.v1.core.kv_cache_utils import (
+        get_request_block_hasher,
+        init_none_hash,
+    )
+
+    hash_fn = get_hash_fn_by_name(vllm_config.cache_config.prefix_caching_hash_algo)
+    init_none_hash(hash_fn)
+    return get_request_block_hasher(
+        vllm_config.cache_config.block_size,
+        hash_fn,
+    )
 
 
 def _resolve_default_model() -> str:

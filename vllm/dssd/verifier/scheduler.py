@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -14,8 +16,13 @@ from .types import VerifierRoundRequest, VerifierSession
 
 
 class VerifierSchedulerAdapter:
-    def __init__(self, kv_cache_manager: KVCacheManager | None = None) -> None:
+    def __init__(
+        self,
+        kv_cache_manager: KVCacheManager | None = None,
+        request_block_hasher: Callable | None = None,
+    ) -> None:
         self.kv_cache_manager = kv_cache_manager
+        self.request_block_hasher = request_block_hasher
         self._pending_new_block_ids_to_zero: list[int] | None = None
 
     def allocate_blocks(
@@ -35,6 +42,7 @@ class VerifierSchedulerAdapter:
             sampling_params=sampling_params,
             pooling_params=None,
             lora_request=lora_request,
+            block_hasher=self.request_block_hasher,
         )
         blocks = self.kv_cache_manager.allocate_slots(
             request=request,
@@ -167,6 +175,7 @@ class VerifierSchedulerAdapter:
             sampling_params=session.sampling_params,
             pooling_params=None,
             lora_request=session.lora_request,
+            block_hasher=self.request_block_hasher,
         )
         finalized_output = session.token_ids[session.prompt_len :]
         if finalized_output:
