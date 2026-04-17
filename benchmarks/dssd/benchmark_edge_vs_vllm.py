@@ -17,6 +17,7 @@ import torch
 from transformers import AutoTokenizer
 
 from vllm import EngineArgs, LLM, SamplingParams, TokensPrompt
+from vllm import envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.dssd.edge import (
     DSSDEdgeDraftSampler,
@@ -24,6 +25,7 @@ from vllm.dssd.edge import (
     EdgeSchedulerAdapter,
     EdgeStateBridge,
 )
+from vllm.distributed import cleanup_dist_env_and_memory
 import vllm.platforms as platforms
 from vllm.platforms.cuda import CudaPlatform
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -94,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         "--dtype",
         default="auto",
         help="Model dtype passed to vLLM.",
+    )
+    parser.add_argument(
+        "--native-model-runner",
+        choices=("v1", "v2"),
+        default="v1",
+        help="Model runner used by the native engine benchmark.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -226,9 +234,12 @@ class EdgeRuntime:
         self._tempfile: tempfile.NamedTemporaryFile[str] | None = None
         self.worker: Worker | None = None
         self.engine: EdgeDecodeEngine | None = None
+        self._old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
 
     def __enter__(self) -> "EdgeRuntime":
         require_cuda()
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        envs.disable_envs_cache()
         os.environ.setdefault("RANK", "0")
         os.environ.setdefault("LOCAL_RANK", "0")
         os.environ.setdefault("WORLD_SIZE", "1")
@@ -266,6 +277,7 @@ class EdgeRuntime:
                 )
             self.vllm_config.validate_block_size()
             self.worker.initialize_from_config(kv_cache_configs[0])
+            self.worker.compile_or_warm_up_model()
 
         kv_cache_manager = KVCacheManager(
             kv_cache_config=scheduler_kv_cache_config,
@@ -293,6 +305,7 @@ class EdgeRuntime:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.worker is not None:
             self.worker.shutdown()
+        cleanup_dist_env_and_memory()
         if self._tempfile is not None:
             try:
                 Path(self._tempfile.name).unlink(missing_ok=True)
@@ -301,6 +314,11 @@ class EdgeRuntime:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if self._old_use_v2_model_runner is None:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        else:
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = self._old_use_v2_model_runner
+        envs.disable_envs_cache()
 
 
 def benchmark_edge(
@@ -351,6 +369,12 @@ def benchmark_native(
     sampling_params: SamplingParams,
 ) -> BenchmarkResult:
     require_cuda()
+    old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+    if args.native_model_runner == "v2":
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    else:
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+    envs.disable_envs_cache()
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
@@ -358,17 +382,18 @@ def benchmark_native(
     )
     prompt_token_ids = tokenizer(args.prompt).input_ids
     prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-    llm = LLM(
-        model=args.model,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len,
-        enforce_eager=args.enforce_eager,
-        enable_prefix_caching=False,
-    )
+    llm = None
     try:
+        llm = LLM(
+            model=args.model,
+            trust_remote_code=args.trust_remote_code,
+            dtype=args.dtype,
+            tensor_parallel_size=1,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+            enforce_eager=args.enforce_eager,
+            enable_prefix_caching=False,
+        )
         for _ in range(args.warmup_iters):
             llm.generate([prompt], sampling_params=sampling_params, use_tqdm=False)
         synchronize_if_needed()
@@ -401,10 +426,16 @@ def benchmark_native(
             tokens_per_second=total_tokens / total_seconds,
         )
     finally:
-        del llm
+        if llm is not None:
+            del llm
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if old_use_v2_model_runner is None:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        else:
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_use_v2_model_runner
+        envs.disable_envs_cache()
 
 
 def run_subprocess_for_engine(
@@ -427,6 +458,8 @@ def run_subprocess_for_engine(
         str(args.benchmark_iters),
         "--dtype",
         args.dtype,
+        "--native-model-runner",
+        args.native_model_runner,
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
         "--max-model-len",

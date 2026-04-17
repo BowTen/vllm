@@ -66,6 +66,48 @@ class VerifierStateBridge:
     ) -> None:
         self._round_state(session).draft_q_values = list(q_values)
 
+    def inject_local_token(
+        self,
+        session: VerifierSession,
+        token_id: int,
+        model_runner: "GPUModelRunner",
+        *,
+        computed_delta: int,
+    ) -> None:
+        req_idx = model_runner.req_states.req_id_to_index[session.req_id]
+        old_total_len = session.total_len
+        session.token_ids.append(int(token_id))
+        session.total_len += 1
+        session.num_computed_tokens += computed_delta
+
+        req_states = model_runner.req_states
+        req_states.last_sampled_tokens[req_idx, 0] = int(token_id)
+        req_states.all_token_ids.stage_write(req_idx, old_total_len, [int(token_id)])
+        req_states.total_len.stage_write_elem(req_idx, session.total_len)
+        req_states.num_computed_tokens.stage_write_elem(
+            req_idx,
+            session.num_computed_tokens,
+        )
+        req_states.apply_staged_writes()
+
+    def prepare_local_decode(
+        self,
+        session: VerifierSession,
+        input_token_id: int,
+        model_runner: "GPUModelRunner",
+    ) -> None:
+        req_idx = model_runner.req_states.req_id_to_index[session.req_id]
+        model_runner.req_states.last_sampled_tokens[req_idx, 0] = int(input_token_id)
+
+    def commit_local_token(
+        self,
+        session: VerifierSession,
+        token_id: int,
+    ) -> None:
+        session.token_ids.append(int(token_id))
+        session.total_len += 1
+        session.num_computed_tokens += 1
+
     def commit_committed_token_before_postprocess(
         self,
         session: VerifierSession,

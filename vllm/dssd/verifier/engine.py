@@ -88,6 +88,50 @@ class VerifierDecodeEngine:
             bootstrap_token_id=bootstrap_token_id,
         )
 
+    def generate_local(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params: SamplingParams,
+        lora_request: LoRARequest | None = None,
+    ) -> list[int]:
+        max_tokens = sampling_params.max_tokens or 0
+        if max_tokens <= 0:
+            return []
+
+        opened = self.open_session(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
+        session = self.sessions[req_id]
+        bootstrap_token_id = opened.bootstrap_token_id
+        self.state_bridge.inject_local_token(
+            session,
+            bootstrap_token_id,
+            self.model_runner,
+            computed_delta=1,
+        )
+        output_token_ids = [bootstrap_token_id]
+
+        try:
+            if self._should_stop_local_generation(sampling_params, bootstrap_token_id):
+                return output_token_ids
+
+            while len(output_token_ids) < max_tokens:
+                next_token_id = self.decode_one_local(session, output_token_ids[-1])
+                output_token_ids.append(next_token_id)
+                if self._should_stop_local_generation(
+                    sampling_params,
+                    next_token_id,
+                ):
+                    break
+
+            return output_token_ids
+        finally:
+            self.close_session(session)
+
     def verify_round(
         self,
         session: VerifierSession,
@@ -134,6 +178,19 @@ class VerifierDecodeEngine:
         result = raw_result.to_round_result()
         self.state_bridge.set_round_result(session, result)
         return result
+
+    def decode_one_local(
+        self,
+        session: VerifierSession,
+        input_token_id: int,
+    ) -> int:
+        self.state_bridge.prepare_local_decode(
+            session,
+            input_token_id,
+            self.model_runner,
+        )
+        self._execute(self.scheduler.build_decode_step(session))
+        return self._sample_local_token(session)
 
     def close_session(self, session: VerifierSession) -> None:
         self.scheduler.free_blocks(session)
@@ -223,3 +280,35 @@ class VerifierDecodeEngine:
             zeros,
             zeros,
         )
+
+    def _sample_local_token(self, session: VerifierSession) -> int:
+        state = self.model_runner.take_execute_model_state()
+        hidden_states = self._take_hidden_states(state.hidden_states)
+        sampler_output, num_sampled, num_rejected = self.model_runner.sample(
+            hidden_states,
+            state.input_batch,
+            grammar_output=None,
+        )
+        if sampler_output.sampled_token_ids.numel() == 0:
+            raise RuntimeError("local decode did not sample any token")
+
+        device = state.input_batch.seq_lens.device
+        self.model_runner.postprocess(
+            state.input_batch,
+            sampler_output.sampled_token_ids.to(device=device, dtype=torch.int64),
+            num_sampled.to(device=device, dtype=torch.int32),
+            num_rejected.to(device=device, dtype=torch.int32),
+        )
+        token_id = int(sampler_output.sampled_token_ids[0, 0].item())
+        self.state_bridge.commit_local_token(session, token_id)
+        return token_id
+
+    @staticmethod
+    def _should_stop_local_generation(
+        sampling_params: SamplingParams,
+        token_id: int,
+    ) -> bool:
+        if sampling_params.ignore_eos:
+            return False
+        eos_token_id = sampling_params._eos_token_id
+        return eos_token_id is not None and int(token_id) == int(eos_token_id)

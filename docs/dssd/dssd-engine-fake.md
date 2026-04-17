@@ -1,5 +1,5 @@
 ## 背景
-我在做我的本科毕设，要基于vllm来实现分布式投机采样原型系统，即DSSD，算法参考在 /home/zz/workspace/vllm/docs/DSSD-algorithm.md
+我在做我的本科毕设，要基于vllm来实现分布式投机采样原型系统，即DSSD，算法参考在 DSSD-algorithm.md
 
 ## 实现要求
  - 尽量简单，快速跑起来，nano风格，独立于vllm库开发，不用考虑合并，不用规范，不用错误处理。但要有测试以提高开发效率和保证正确性

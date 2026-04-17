@@ -129,6 +129,41 @@ class VerifierSchedulerAdapter:
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
+    def build_decode_step(self, session: VerifierSession) -> SchedulerOutput:
+        query_len = 1
+        new_block_ids_to_zero: list[int] | None = None
+        new_block_ids: list[tuple[list[int], ...] | None] = [None]
+        if self.kv_cache_manager is not None:
+            request_view = self._make_request(session)
+            blocks = self.kv_cache_manager.allocate_slots(
+                request=request_view,
+                num_new_tokens=query_len,
+            )
+            if blocks is None:
+                raise RuntimeError("local decode cannot allocate KV blocks")
+            new_block_ids = [blocks.get_block_ids(allow_none=True)]
+            new_block_ids_to_zero = self._drain_new_block_ids_to_zero(blocks)
+        return SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData(
+                req_ids=[session.req_id],
+                resumed_req_ids=set(),
+                new_token_ids=[[]],
+                all_token_ids={},
+                new_block_ids=new_block_ids,
+                num_computed_tokens=[session.num_computed_tokens],
+                num_output_tokens=[session.output_len],
+            ),
+            num_scheduled_tokens={session.req_id: query_len},
+            total_num_scheduled_tokens=query_len,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=new_block_ids_to_zero,
+        )
+
     def build_close_step(self, req_id: str) -> SchedulerOutput:
         return SchedulerOutput(
             scheduled_new_reqs=[],

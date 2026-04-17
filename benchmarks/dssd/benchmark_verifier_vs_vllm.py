@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark decode-only speed for native vLLM vs DSSD verifier.
+"""Benchmark single-request generation speed for native vLLM vs DSSD verifier.
 
 This benchmark is intentionally narrow:
 - batch size is fixed to 1
-- prompt prefill is excluded from timing
-- the bootstrap token after prefill is excluded from timing
-- an optional decode warmup window is excluded from timing
+- the timer covers one full request from enqueue/open_session to the last token
+- throughput is computed from the full generated token count in that request
 
 Example:
     CUDA_VISIBLE_DEVICES=1 PYTHONPATH=$PWD \\
@@ -20,11 +19,16 @@ import gc
 import json
 import os
 import statistics
+import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+
+SCRIPT_PATH = Path(__file__).resolve()
 
 
 @dataclass
@@ -39,6 +43,7 @@ class BenchmarkConfig:
     dtype: str
     enforce_eager: bool
     trust_remote_code: bool
+    native_model_runner: str
 
 
 @dataclass
@@ -49,32 +54,8 @@ class RepeatResult:
     token_ids: list[int]
 
 
-class DecodeMeasurementCounter:
-    """Track decode tokens while excluding prefill-adjacent bootstrap/warmup."""
-
-    def __init__(self, warmup_tokens: int, target_tokens: int) -> None:
-        self.warmup_tokens = warmup_tokens
-        self.target_tokens = target_tokens
-        self._bootstrap_consumed = False
-        self._measured_count = 0
-
-    def consume(self, token_ids: list[int]) -> list[int]:
-        measured: list[int] = []
-        for token_id in token_ids:
-            if not self._bootstrap_consumed:
-                self._bootstrap_consumed = True
-                continue
-            if self.warmup_tokens > 0:
-                self.warmup_tokens -= 1
-                continue
-            if self._measured_count >= self.target_tokens:
-                break
-            measured.append(int(token_id))
-            self._measured_count += 1
-        return measured
-
-    def is_complete(self) -> bool:
-        return self._measured_count >= self.target_tokens
+def _generated_tokens_per_request(config: BenchmarkConfig) -> int:
+    return _required_total_tokens(config)
 
 
 class BenchmarkVerifierSchedulerAdapter:
@@ -186,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model dtype passed to vLLM.",
     )
     parser.add_argument(
+        "--native-model-runner",
+        choices=("v1", "v2"),
+        default="v1",
+        help="Model runner used by the native engine benchmark.",
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Forward trust_remote_code to tokenizer/model loading.",
@@ -200,6 +187,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print JSON in addition to the human-readable summary.",
+    )
+    parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--validate-token-alignment",
+        action="store_true",
+        help="Assert native and verifier measured token IDs match in both mode.",
     )
     return parser
 
@@ -260,6 +257,30 @@ def _require_cuda() -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this benchmark.")
+
+
+def _set_model_runner_env(model_runner: str) -> str | None:
+    from vllm import envs
+
+    old_value = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+    if model_runner == "v2":
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    elif model_runner == "v1":
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+    else:
+        raise ValueError(f"unsupported model runner: {model_runner}")
+    envs.disable_envs_cache()
+    return old_value
+
+
+def _restore_model_runner_env(old_value: str | None) -> None:
+    from vllm import envs
+
+    if old_value is None:
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+    else:
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_value
+    envs.disable_envs_cache()
 
 
 def _ensure_cuda_platform_if_needed() -> None:
@@ -337,6 +358,7 @@ def _run_native_benchmark(
 
     engine = None
     results: list[RepeatResult] = []
+    old_model_runner = _set_model_runner_env(config.native_model_runner)
     try:
         engine_args = EngineArgs(
             model=config.model,
@@ -352,50 +374,19 @@ def _run_native_benchmark(
         engine = LLMEngine.from_engine_args(engine_args, enable_multiprocessing=False)
 
         for repeat_idx in range(config.repeats):
-            req_id = f"native-{repeat_idx}-{time.time_ns()}"
-            params = _make_sampling_params(
-                _required_total_tokens(config),
-                output_kind=RequestOutputKind.DELTA,
-            )
-            engine.add_request(req_id, {"prompt_token_ids": prompt_token_ids}, params)
-
-            counter = DecodeMeasurementCounter(
-                warmup_tokens=config.warmup_tokens,
-                target_tokens=config.decode_tokens,
-            )
-            measured_token_ids: list[int] = []
-            measured_total_s = 0.0
-
-            while not counter.is_complete():
-                _synchronize()
-                t0 = time.perf_counter()
-                outputs = engine.step()
-                _synchronize()
-                step_s = time.perf_counter() - t0
-
-                step_token_ids: list[int] = []
-                for output in outputs:
-                    if not output.outputs:
-                        continue
-                    step_token_ids.extend(output.outputs[0].token_ids)
-
-                measured_step_token_ids = counter.consume(step_token_ids)
-                if measured_step_token_ids:
-                    measured_token_ids.extend(measured_step_token_ids)
-                    measured_total_s += step_s
-
             results.append(
-                RepeatResult(
-                    total_s=measured_total_s,
-                    tokens_per_s=config.decode_tokens / measured_total_s,
-                    per_token_ms=measured_total_s * 1000.0 / config.decode_tokens,
-                    token_ids=measured_token_ids,
+                _run_native_repeat(
+                    engine,
+                    config,
+                    req_id=f"native-{repeat_idx}-{time.time_ns()}",
+                    prompt_token_ids=prompt_token_ids,
                 )
             )
 
         return results
     finally:
         _teardown_llm_engine(engine)
+        _restore_model_runner_env(old_model_runner)
 
 
 def _run_verifier_benchmark(
@@ -407,7 +398,6 @@ def _run_verifier_benchmark(
     from vllm.dssd.verifier.engine import VerifierDecodeEngine
     from vllm.dssd.verifier.sampler import DSSDVerifierSampler
     from vllm.dssd.verifier.state_bridge import VerifierStateBridge
-    from vllm.dssd.verifier.types import VerifierRoundRequest
     from vllm.utils.hashing import get_hash_fn_by_name
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import (
@@ -420,6 +410,7 @@ def _run_verifier_benchmark(
 
     worker = None
     results: list[RepeatResult] = []
+    old_model_runner = _set_model_runner_env("v2")
     try:
         vllm_config = _build_vllm_config(config)
         with tempfile.NamedTemporaryFile() as tmp_file, set_current_vllm_config(
@@ -445,11 +436,20 @@ def _run_verifier_benchmark(
                 kv_cache_configs
             )
             worker.initialize_from_config(kv_cache_configs[0])
+            worker.compile_or_warm_up_model()
 
             kv_cache_manager = KVCacheManager(
                 kv_cache_config=scheduler_kv_cache_config,
                 max_model_len=vllm_config.model_config.max_model_len,
                 hash_block_size=vllm_config.cache_config.block_size,
+                enable_caching=vllm_config.cache_config.enable_prefix_caching,
+                use_eagle=False,
+                log_stats=False,
+                enable_kv_cache_events=False,
+                dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+                pcp_world_size=(
+                    vllm_config.parallel_config.prefill_context_parallel_size
+                ),
             )
 
             hash_fn = get_hash_fn_by_name(
@@ -476,58 +476,14 @@ def _run_verifier_benchmark(
             )
 
             for repeat_idx in range(config.repeats):
-                req_id = f"verifier-{repeat_idx}-{time.time_ns()}"
-                opened = engine.open_session(
-                    req_id=req_id,
-                    prompt_token_ids=prompt_token_ids,
-                    sampling_params=_make_sampling_params(_required_total_tokens(config)),
-                )
-
-                session = engine.sessions[req_id]
-                next_token = opened.bootstrap_token_id
-
-                for _ in range(config.warmup_tokens):
-                    result = engine.verify_round(
-                        session,
-                        VerifierRoundRequest(
-                            req_id=req_id,
-                            committed_token_id=next_token,
-                            draft_token_ids=[],
-                            draft_q_values=[],
-                        ),
-                    )
-                    assert result.bonus_token_id is not None
-                    next_token = result.bonus_token_id
-
-                measured_token_ids: list[int] = []
-                measured_total_s = 0.0
-                for _ in range(config.decode_tokens):
-                    _synchronize()
-                    t0 = time.perf_counter()
-                    result = engine.verify_round(
-                        session,
-                        VerifierRoundRequest(
-                            req_id=req_id,
-                            committed_token_id=next_token,
-                            draft_token_ids=[],
-                            draft_q_values=[],
-                        ),
-                    )
-                    _synchronize()
-                    measured_total_s += time.perf_counter() - t0
-                    assert result.bonus_token_id is not None
-                    next_token = result.bonus_token_id
-                    measured_token_ids.append(next_token)
-
                 results.append(
-                    RepeatResult(
-                        total_s=measured_total_s,
-                        tokens_per_s=config.decode_tokens / measured_total_s,
-                        per_token_ms=measured_total_s * 1000.0 / config.decode_tokens,
-                        token_ids=measured_token_ids,
+                    _run_verifier_repeat(
+                        engine,
+                        config,
+                        req_id=f"verifier-{repeat_idx}-{time.time_ns()}",
+                        prompt_token_ids=prompt_token_ids,
                     )
                 )
-                engine.close_session(session)
 
         return results
     finally:
@@ -536,6 +492,68 @@ def _run_verifier_benchmark(
                 worker.shutdown()
             finally:
                 cleanup_dist_env_and_memory()
+        _restore_model_runner_env(old_model_runner)
+
+
+def _run_native_repeat(
+    engine,
+    config: BenchmarkConfig,
+    *,
+    req_id: str,
+    prompt_token_ids: list[int],
+) -> RepeatResult:
+    from vllm.sampling_params import RequestOutputKind
+
+    target_tokens = _generated_tokens_per_request(config)
+    params = _make_sampling_params(
+        target_tokens,
+        output_kind=RequestOutputKind.DELTA,
+    )
+    generated_token_ids: list[int] = []
+
+    _synchronize()
+    t0 = time.perf_counter()
+    engine.add_request(req_id, {"prompt_token_ids": prompt_token_ids}, params)
+    while len(generated_token_ids) < target_tokens:
+        outputs = engine.step()
+        for output in outputs:
+            if not output.outputs:
+                continue
+            generated_token_ids.extend(output.outputs[0].token_ids)
+    _synchronize()
+    total_s = time.perf_counter() - t0
+    generated_token_ids = generated_token_ids[:target_tokens]
+    return RepeatResult(
+        total_s=total_s,
+        tokens_per_s=target_tokens / total_s,
+        per_token_ms=total_s * 1000.0 / target_tokens,
+        token_ids=generated_token_ids,
+    )
+
+
+def _run_verifier_repeat(
+    engine,
+    config: BenchmarkConfig,
+    *,
+    req_id: str,
+    prompt_token_ids: list[int],
+) -> RepeatResult:
+    target_tokens = _generated_tokens_per_request(config)
+    _synchronize()
+    t0 = time.perf_counter()
+    generated_token_ids = engine.generate_local(
+        req_id=req_id,
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=_make_sampling_params(target_tokens),
+    )
+    _synchronize()
+    total_s = time.perf_counter() - t0
+    return RepeatResult(
+        total_s=total_s,
+        tokens_per_s=len(generated_token_ids) / total_s,
+        per_token_ms=total_s * 1000.0 / len(generated_token_ids),
+        token_ids=generated_token_ids,
+    )
 
 
 def _summarize(results: list[RepeatResult]) -> dict[str, float]:
@@ -573,6 +591,27 @@ def _print_results(label: str, results: list[RepeatResult]) -> None:
     )
 
 
+def _repeat_results_from_payload(
+    payload: dict[str, Any],
+    engine: str,
+) -> list[RepeatResult]:
+    return [RepeatResult(**repeat) for repeat in payload[engine]["repeats"]]
+
+
+def _print_payload(payload: dict[str, Any]) -> None:
+    print("Config")
+    print(json.dumps(payload["config"], indent=2))
+    if "native" in payload:
+        _print_results("native", _repeat_results_from_payload(payload, "native"))
+    if "verifier" in payload:
+        _print_results("verifier", _repeat_results_from_payload(payload, "verifier"))
+    if "speedup_verifier_over_native" in payload:
+        print(
+            "\nSpeedup verifier/native = "
+            f"{payload['speedup_verifier_over_native']:.4f}x"
+        )
+
+
 def _validate_token_alignment(
     native_results: list[RepeatResult],
     verifier_results: list[RepeatResult],
@@ -590,12 +629,114 @@ def _validate_token_alignment(
             )
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def _merge_both_payloads(
+    native_payload: dict[str, Any],
+    verifier_payload: dict[str, Any],
+    *,
+    validate_token_alignment: bool,
+) -> dict[str, Any]:
+    if native_payload["config"] != verifier_payload["config"]:
+        raise RuntimeError(
+            "native and verifier subprocesses used different benchmark configs"
+        )
 
+    if validate_token_alignment:
+        _validate_token_alignment(
+            _repeat_results_from_payload(native_payload, "native"),
+            _repeat_results_from_payload(verifier_payload, "verifier"),
+        )
+
+    payload = {
+        "config": native_payload["config"],
+        "native": native_payload["native"],
+        "verifier": verifier_payload["verifier"],
+    }
+    payload["speedup_verifier_over_native"] = (
+        payload["verifier"]["summary"]["mean_tokens_per_s"]
+        / payload["native"]["summary"]["mean_tokens_per_s"]
+    )
+    return payload
+
+
+def _loads_trailing_json(stdout: str) -> dict[str, Any]:
+    text = stdout.strip()
+    start = text.rfind("{")
+    decoder = json.JSONDecoder()
+    while start >= 0:
+        try:
+            payload, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            start = text.rfind("{", 0, start)
+            continue
+        if text[end:].strip() == "" and isinstance(payload, dict):
+            return payload
+        start = text.rfind("{", 0, start)
+    raise RuntimeError(
+        "could not parse benchmark JSON payload from subprocess stdout\n"
+        f"stdout tail:\n{text[-2000:]}"
+    )
+
+
+def run_subprocess_for_engine(
+    args: argparse.Namespace,
+    engine: str,
+) -> dict[str, Any]:
+    cmd = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--engine",
+        engine,
+        "--model",
+        args.model,
+        "--prompt-len",
+        str(args.prompt_len),
+        "--decode-tokens",
+        str(args.decode_tokens),
+        "--warmup-tokens",
+        str(args.warmup_tokens),
+        "--repeats",
+        str(args.repeats),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
+        "--dtype",
+        args.dtype,
+        "--native-model-runner",
+        args.native_model_runner,
+        "--json-only",
+    ]
+    if args.trust_remote_code:
+        cmd.append("--trust-remote-code")
+    cmd.append("--enforce-eager" if args.enforce_eager else "--no-enforce-eager")
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"{engine} subprocess failed with exit code {exc.returncode}\n"
+            f"stdout:\n{exc.stdout}\n"
+            f"stderr:\n{exc.stderr}"
+        ) from exc
+    return _loads_trailing_json(completed.stdout)
+
+
+def _run_both_in_subprocesses(args: argparse.Namespace) -> dict[str, Any]:
+    native_payload = run_subprocess_for_engine(args, "native")
+    verifier_payload = run_subprocess_for_engine(args, "verifier")
+    return _merge_both_payloads(
+        native_payload,
+        verifier_payload,
+        validate_token_alignment=args.validate_token_alignment,
+    )
+
+
+def _run_single_engine_payload(args: argparse.Namespace) -> dict[str, Any]:
     _require_cuda()
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     from vllm import envs
 
@@ -620,46 +761,38 @@ def main() -> None:
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
         trust_remote_code=args.trust_remote_code,
+        native_model_runner=args.native_model_runner,
     )
 
-    print("Config")
-    print(json.dumps(asdict(config), indent=2))
-
-    native_results: list[RepeatResult] | None = None
-    verifier_results: list[RepeatResult] | None = None
-    if args.engine in ("both", "native"):
-        native_results = _run_native_benchmark(config, prompt_token_ids)
-        _print_results("native", native_results)
-
-    if args.engine in ("both", "verifier"):
-        verifier_results = _run_verifier_benchmark(config, prompt_token_ids)
-        _print_results("verifier", verifier_results)
-
     payload: dict[str, Any] = {"config": asdict(config)}
-    if native_results is not None:
+    if args.engine == "native":
+        native_results = _run_native_benchmark(config, prompt_token_ids)
         payload["native"] = {
             "repeats": [asdict(result) for result in native_results],
             "summary": _summarize(native_results),
         }
-    if verifier_results is not None:
+    else:
+        verifier_results = _run_verifier_benchmark(config, prompt_token_ids)
         payload["verifier"] = {
             "repeats": [asdict(result) for result in verifier_results],
             "summary": _summarize(verifier_results),
         }
-    if native_results is not None and verifier_results is not None:
-        _validate_token_alignment(native_results, verifier_results)
-        payload["speedup_verifier_over_native"] = (
-            payload["verifier"]["summary"]["mean_tokens_per_s"]
-            / payload["native"]["summary"]["mean_tokens_per_s"]
-        )
-        print(
-            "\nSpeedup verifier/native = "
-            f"{payload['speedup_verifier_over_native']:.4f}x"
-        )
+    return payload
 
-    if args.json:
-        print(json.dumps(payload, indent=2))
 
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.engine == "both":
+        payload = _run_both_in_subprocesses(args)
+    else:
+        payload = _run_single_engine_payload(args)
+
+    if args.json_only:
+        print(json.dumps(payload))
+    else:
+        _print_payload(payload)
+        if args.json:
+            print(json.dumps(payload, indent=2))
     gc.collect()
 
 

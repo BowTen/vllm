@@ -178,6 +178,7 @@ def _init_real_runtime(args) -> tuple[SimpleNamespace, Callable[[], None]]:
                 kv_cache_configs
             )
             worker.initialize_from_config(kv_cache_configs[0])
+            worker.compile_or_warm_up_model()
 
             runtime = SimpleNamespace(
                 worker=worker,
