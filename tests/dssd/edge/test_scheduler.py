@@ -1,4 +1,5 @@
 from vllm.sampling_params import SamplingParams
+from vllm.v1.request import Request
 
 from vllm.dssd.edge.scheduler import EdgeSchedulerAdapter
 from vllm.dssd.edge.types import EdgeSession
@@ -25,6 +26,7 @@ class FakeKVCacheManager:
         allocated_block_ids=(([7, 8],), ([7, 8],)),
         new_block_id_batches=([41, 42], [51, 52]),
         num_kv_cache_groups=1,
+        enable_caching=False,
     ):
         self.allocate_calls = []
         self.freed_requests = []
@@ -32,6 +34,7 @@ class FakeKVCacheManager:
         self._allocated_block_ids = list(allocated_block_ids)
         self._new_block_id_batches = list(new_block_id_batches)
         self.kv_cache_config = FakeKVCacheConfig(num_kv_cache_groups)
+        self.enable_caching = enable_caching
 
     def allocate_slots(self, request, num_new_tokens):
         self.allocate_calls.append((request, num_new_tokens))
@@ -91,18 +94,17 @@ def test_prefill_and_decode_steps_use_kv_cache_manager() -> None:
     assert block_ids == ([7, 8],)
     assert len(kv.allocate_calls) == 2
     assert prefill_num_new_tokens == len(session.prompt_token_ids)
+    assert isinstance(prefill_request, Request)
     assert prefill.num_scheduled_tokens == {"req-1": 2}
     assert prefill.new_block_ids_to_zero == [41, 42]
     assert prefill.num_common_prefix_blocks == [0]
     assert prefill.scheduled_new_reqs[0].block_ids == block_ids
     assert preserved_queue_ids == [99]
+    assert not isinstance(decode_request, Request)
     assert decode_num_new_tokens == 1
-    assert decode_num_new_tokens == (
-        decode_request.num_tokens - decode_request.num_computed_tokens
-    )
-    assert list(decode_request.output_token_ids) == session.token_ids[
-        session.prompt_len:
-    ]
+    assert decode_request.request_id == session.req_id
+    assert decode_request.num_tokens == len(session.token_ids)
+    assert decode_request.num_computed_tokens == session.num_computed_tokens
     assert decode.num_scheduled_tokens == {"req-1": 1}
     assert decode.scheduled_cached_reqs.req_ids == ["req-1"]
     assert decode.scheduled_cached_reqs.new_block_ids == [([7, 8],)]
@@ -128,7 +130,7 @@ def test_allocate_blocks_returns_concrete_empty_shape_for_prefill() -> None:
 
 
 def test_request_block_hasher_is_threaded_into_built_requests() -> None:
-    kv = FakeKVCacheManager()
+    kv = FakeKVCacheManager(enable_caching=True)
     request_block_hasher = lambda request: [f"hash:{tuple(request.all_token_ids)}"]
     adapter = EdgeSchedulerAdapter(
         kv, request_block_hasher=request_block_hasher
@@ -156,6 +158,32 @@ def test_request_block_hasher_is_threaded_into_built_requests() -> None:
         "hash:(10, 11)",
         "hash:(10, 11, 20)",
     ]
+
+
+def test_decode_step_uses_lightweight_request_view_when_prefix_caching_disabled() -> None:
+    kv = FakeKVCacheManager()
+    hasher_calls: list[tuple[int, ...]] = []
+
+    def request_block_hasher(request) -> list[str]:
+        hasher_calls.append(tuple(request.all_token_ids))
+        return ["unused"]
+
+    adapter = EdgeSchedulerAdapter(
+        kv,
+        request_block_hasher=request_block_hasher,
+    )
+    session = make_session()
+
+    adapter.build_decode_step(session)
+
+    decode_request, decode_num_new_tokens = kv.allocate_calls[0]
+
+    assert not isinstance(decode_request, Request)
+    assert decode_request.request_id == session.req_id
+    assert decode_request.num_tokens == len(session.token_ids)
+    assert decode_request.num_computed_tokens == session.num_computed_tokens
+    assert decode_num_new_tokens == 1
+    assert hasher_calls == []
 
 
 def test_scheduler_adapter_scope_is_documented() -> None:

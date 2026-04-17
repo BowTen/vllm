@@ -195,6 +195,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dump-decode-state",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Dump scheduler/model-runner decode state for the first N decode "
+            "steps of each runtime-engine request."
+        ),
+    )
+    parser.add_argument(
         "--output-json",
         nargs="?",
         const="auto",
@@ -309,10 +319,124 @@ def _new_phase_seconds() -> dict[str, float]:
         "open_session": 0.0,
         "prefill_execute": 0.0,
         "bootstrap": 0.0,
-        "decode_execute": 0.0,
+        "decode_schedule": 0.0,
+        "decode_model": 0.0,
         "decode_postprocess": 0.0,
         "close_session": 0.0,
     }
+
+
+def _new_zero_phase_seconds() -> dict[str, float]:
+    return {phase_name: 0.0 for phase_name in _new_phase_seconds()}
+
+
+def _summarize_new_block_ids(
+    new_block_ids: list[tuple[list[int], ...] | None],
+) -> list[list[int] | None]:
+    summary: list[list[int] | None] = []
+    for req_block_ids in new_block_ids:
+        if req_block_ids is None:
+            summary.append(None)
+            continue
+        summary.append([len(group_ids) for group_ids in req_block_ids])
+    return summary
+
+
+def _dump_edge_decode_state(
+    runtime: "EdgeRuntime",
+    *,
+    req_id: str,
+    session,
+    step_index: int,
+    scheduler_output,
+) -> None:
+    engine = runtime.engine
+    if engine is None:
+        raise RuntimeError("edge runtime engine is not initialized")
+
+    model_runner = engine.model_runner
+    state = model_runner.execute_model_state
+    if state is None:
+        raise RuntimeError("edge decode state is unavailable before sampling")
+
+    total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+    payload = {
+        "kind": "edge_decode_state",
+        "req_id": req_id,
+        "step_index": step_index,
+        "session_total_len": session.total_len,
+        "session_num_computed_tokens": session.num_computed_tokens,
+        "scheduler_num_scheduled_tokens": dict(scheduler_output.num_scheduled_tokens),
+        "scheduler_total_num_scheduled_tokens": total_num_scheduled_tokens,
+        "scheduler_cached_num_computed_tokens": list(
+            scheduler_output.scheduled_cached_reqs.num_computed_tokens
+        ),
+        "scheduler_cached_num_output_tokens": list(
+            scheduler_output.scheduled_cached_reqs.num_output_tokens
+        ),
+        "scheduler_cached_new_block_id_counts": _summarize_new_block_ids(
+            scheduler_output.scheduled_cached_reqs.new_block_ids
+        ),
+    }
+
+    if hasattr(state, "input_batch"):
+        input_batch = state.input_batch
+        req_state_index = model_runner.req_states.req_id_to_index[session.req_id]
+        num_reqs = input_batch.num_reqs
+        payload.update(
+            {
+                "runner": "v2",
+                "input_batch_num_reqs": num_reqs,
+                "input_batch_req_ids": list(input_batch.req_ids),
+                "input_batch_num_computed_tokens": int(
+                    model_runner.req_states.num_computed_tokens.gpu[
+                        req_state_index
+                    ].item()
+                ),
+                "query_start_loc": input_batch.query_start_loc[
+                    : num_reqs + 1
+                ].cpu().tolist(),
+                "seq_lens": input_batch.seq_lens[:num_reqs].cpu().tolist(),
+                "positions": input_batch.positions[
+                    :total_num_scheduled_tokens
+                ].cpu().tolist(),
+                "input_ids": input_batch.input_ids[
+                    :total_num_scheduled_tokens
+                ].cpu().tolist(),
+                "block_table_num_blocks": model_runner.block_tables.num_blocks.np[
+                    :, req_state_index
+                ].tolist(),
+            }
+        )
+    else:
+        input_batch = model_runner.input_batch
+        req_index = input_batch.req_id_to_index[session.req_id]
+        num_reqs = input_batch.num_reqs
+        payload.update(
+            {
+                "runner": "v1",
+                "input_batch_num_reqs": num_reqs,
+                "input_batch_req_ids": list(input_batch.req_ids),
+                "input_batch_num_computed_tokens": int(
+                    input_batch.num_computed_tokens_cpu[req_index]
+                ),
+                "query_start_loc": model_runner.query_start_loc.cpu[
+                    : num_reqs + 1
+                ].tolist(),
+                "seq_lens": model_runner.seq_lens.cpu[:num_reqs].tolist(),
+                "positions": model_runner.positions.cpu[
+                    :total_num_scheduled_tokens
+                ].tolist(),
+                "input_ids": model_runner.input_ids.cpu[
+                    :total_num_scheduled_tokens
+                ].tolist(),
+                "block_table_num_blocks": input_batch.block_table.num_blocks.np[
+                    :, req_index
+                ].tolist(),
+            }
+        )
+    print("EDGE_DECODE_STATE " + json.dumps(payload, ensure_ascii=False))
 
 
 def ensure_cuda_platform_if_needed() -> None:
@@ -556,6 +680,7 @@ def _run_profiled_edge_request(
     req_id: str,
     prompt_token_ids: list[int],
     sampling_params: SamplingParams,
+    dump_decode_state_steps: int = 0,
 ) -> tuple[list[int], dict[str, float]]:
     engine = runtime.engine
     if engine is None:
@@ -597,16 +722,32 @@ def _run_profiled_edge_request(
         output_token_ids = [next_token_id]
 
         while len(output_token_ids) < max_tokens:
-            def _decode_execute() -> None:
+            decode_step_index = len(output_token_ids)
+
+            def _decode_schedule():
                 engine.state_bridge.prepare_next_decode(
                     session,
                     output_token_ids[-1],
                     engine.model_runner,
                 )
-                engine._execute(engine.scheduler.build_decode_step(session))
+                return engine.scheduler.build_decode_step(session)
 
-            _, decode_execute_elapsed = _timed_phase(_decode_execute)
-            phase_seconds["decode_execute"] += decode_execute_elapsed
+            scheduler_output, decode_schedule_elapsed = _timed_phase(
+                _decode_schedule
+            )
+            phase_seconds["decode_schedule"] += decode_schedule_elapsed
+            _, decode_model_elapsed = _timed_phase(
+                lambda: engine._execute(scheduler_output)
+            )
+            phase_seconds["decode_model"] += decode_model_elapsed
+            if decode_step_index <= dump_decode_state_steps:
+                _dump_edge_decode_state(
+                    runtime,
+                    req_id=req_id,
+                    session=session,
+                    step_index=decode_step_index,
+                    scheduler_output=scheduler_output,
+                )
             decode_result, decode_postprocess_elapsed = _timed_phase(
                 lambda: engine._sample_with_draft_sampler(session, processed_logits)
             )
@@ -634,7 +775,9 @@ def _run_profiled_verifier_request(
     req_id: str,
     prompt_token_ids: list[int],
     sampling_params: SamplingParams,
+    dump_decode_state_steps: int = 0,
 ) -> tuple[list[int], dict[str, float]]:
+    del dump_decode_state_steps
     engine = runtime.engine
     if engine is None:
         raise RuntimeError("verifier runtime engine is not initialized")
@@ -694,16 +837,22 @@ def _run_profiled_verifier_request(
         output_token_ids = [next_token_id]
 
         while len(output_token_ids) < max_tokens:
-            def _decode_execute() -> None:
+            def _decode_schedule():
                 engine.state_bridge.prepare_local_decode(
                     session,
                     output_token_ids[-1],
                     engine.model_runner,
                 )
-                engine._execute(engine.scheduler.build_decode_step(session))
+                return engine.scheduler.build_decode_step(session)
 
-            _, decode_execute_elapsed = _timed_phase(_decode_execute)
-            phase_seconds["decode_execute"] += decode_execute_elapsed
+            scheduler_output, decode_schedule_elapsed = _timed_phase(
+                _decode_schedule
+            )
+            phase_seconds["decode_schedule"] += decode_schedule_elapsed
+            _, decode_model_elapsed = _timed_phase(
+                lambda: engine._execute(scheduler_output)
+            )
+            phase_seconds["decode_model"] += decode_model_elapsed
             next_token_id, decode_postprocess_elapsed = _timed_phase(
                 lambda: engine._sample_local_token(session)
             )
@@ -730,6 +879,7 @@ def _run_profiled_runtime_request(
     req_id: str,
     prompt_token_ids: list[int],
     sampling_params: SamplingParams,
+    dump_decode_state_steps: int = 0,
 ) -> tuple[list[int], dict[str, float]]:
     if engine_name == "edge":
         return _run_profiled_edge_request(
@@ -737,6 +887,7 @@ def _run_profiled_runtime_request(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
+            dump_decode_state_steps=dump_decode_state_steps,
         )
     if engine_name == "verifier":
         return _run_profiled_verifier_request(
@@ -744,6 +895,7 @@ def _run_profiled_runtime_request(
             req_id=req_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
+            dump_decode_state_steps=dump_decode_state_steps,
         )
     raise ValueError(f"phase timing is not supported for engine: {engine_name}")
 
@@ -825,15 +977,18 @@ def _benchmark_runtime_engine(
     sampling_params: SamplingParams,
     runtime,
     phase_timing: bool,
+    dump_decode_state_steps: int,
 ) -> BenchmarkResult:
+    use_profiled_runtime = phase_timing or dump_decode_state_steps > 0
     for warmup_idx in range(warmup_iters):
-        if phase_timing:
+        if use_profiled_runtime:
             _run_profiled_runtime_request(
                 engine_name=engine_name,
                 runtime=runtime,
                 req_id=f"warmup-{warmup_idx}",
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
+                dump_decode_state_steps=dump_decode_state_steps,
             )
         else:
             runtime.engine.generate_local(
@@ -847,18 +1002,20 @@ def _benchmark_runtime_engine(
     total_seconds = 0.0
     phase_seconds = _new_phase_seconds() if phase_timing else None
     for iter_idx in range(benchmark_iters):
-        if phase_timing:
+        if use_profiled_runtime:
             output_token_ids, request_phase_seconds = _run_profiled_runtime_request(
                 engine_name=engine_name,
                 runtime=runtime,
                 req_id=f"bench-{iter_idx}",
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
+                dump_decode_state_steps=dump_decode_state_steps,
             )
             elapsed = sum(request_phase_seconds.values())
-            assert phase_seconds is not None
-            for phase_name, phase_elapsed in request_phase_seconds.items():
-                phase_seconds[phase_name] += phase_elapsed
+            if phase_timing:
+                assert phase_seconds is not None
+                for phase_name, phase_elapsed in request_phase_seconds.items():
+                    phase_seconds[phase_name] += phase_elapsed
         else:
             synchronize_if_needed()
             t0 = time.perf_counter()
@@ -902,6 +1059,7 @@ def benchmark_edge(
             sampling_params=sampling_params,
             runtime=runtime,
             phase_timing=args.phase_timing,
+            dump_decode_state_steps=args.dump_decode_state,
         )
 
 
@@ -920,6 +1078,7 @@ def benchmark_verifier(
             sampling_params=sampling_params,
             runtime=runtime,
             phase_timing=args.phase_timing,
+            dump_decode_state_steps=args.dump_decode_state,
         )
 
 
@@ -984,6 +1143,8 @@ def run_subprocess_for_engine(
         cmd.append("--honor-eos")
     if args.phase_timing:
         cmd.append("--phase-timing")
+    if args.dump_decode_state > 0:
+        cmd.extend(["--dump-decode-state", str(args.dump_decode_state)])
     completed = subprocess.run(
         cmd,
         check=True,

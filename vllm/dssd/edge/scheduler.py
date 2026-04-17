@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vllm.lora.request import LoRARequest
@@ -17,6 +18,13 @@ from .types import EdgeSession
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+@dataclass(slots=True)
+class _EdgeDecodeRequestView:
+    request_id: str
+    num_tokens: int
+    num_computed_tokens: int
 
 
 class EdgeSchedulerAdapter:
@@ -186,7 +194,7 @@ class EdgeSchedulerAdapter:
         if self.kv_cache_manager is None:
             return None
 
-        request = self._build_decode_request(session)
+        request = self._make_decode_allocation_request(session)
         # Edge decode always schedules a single query token. By the time we
         # reach this path, `request.num_tokens` already reflects the committed
         # prefix, so `request.num_tokens - request.num_computed_tokens` can be
@@ -200,6 +208,19 @@ class EdgeSchedulerAdapter:
         if new_blocks is None:
             raise RuntimeError("decode failed to allocate KV blocks for edge")
         return new_blocks.get_block_ids(allow_none=True)
+
+    def _make_decode_allocation_request(
+        self,
+        session: EdgeSession,
+    ) -> Request | _EdgeDecodeRequestView:
+        kv_cache_manager = self.kv_cache_manager
+        if kv_cache_manager is not None and not kv_cache_manager.enable_caching:
+            return _EdgeDecodeRequestView(
+                request_id=session.req_id,
+                num_tokens=session.total_len,
+                num_computed_tokens=session.num_computed_tokens,
+            )
+        return self._build_decode_request(session)
 
     def _take_new_block_ids_to_zero(self) -> list[int] | None:
         if self.kv_cache_manager is None:
