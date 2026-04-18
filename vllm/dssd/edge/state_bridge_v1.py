@@ -44,9 +44,9 @@ class EdgeStateBridgeV1:
 
     def rollback(self, session, rejected_count: int, model_runner) -> None:
         self._ensure_supported_sampling_params(session)
-        self._ensure_prompt_computed(session)
         if rejected_count <= 0:
             return
+        self._ensure_prompt_computed(session)
         session.num_computed_tokens = max(
             session.prompt_len,
             session.num_computed_tokens - rejected_count,
@@ -70,6 +70,9 @@ class EdgeStateBridgeV1:
         req_state.output_token_ids[:] = committed_output_ids
         req_state.num_computed_tokens = session.num_computed_tokens
 
+        model_runner.input_batch.prev_sampled_token_ids = None
+        model_runner.input_batch.prev_req_id_to_index = None
+
         req_idx = model_runner.input_batch.req_id_to_index.get(session.req_id)
         if req_idx is None:
             return
@@ -89,5 +92,3 @@ class EdgeStateBridgeV1:
         model_runner.input_batch.num_tokens_no_spec[req_idx] = session.total_len
         model_runner.input_batch.num_computed_tokens_cpu[
             req_idx] = session.num_computed_tokens
-        model_runner.input_batch.prev_sampled_token_ids = None
-        model_runner.input_batch.prev_req_id_to_index = None
