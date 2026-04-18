@@ -3,6 +3,9 @@ from __future__ import annotations
 from .state_bridge import validate_edge_sampling_params
 
 
+_OUTPUT_COMPUTED_FLAGS_ATTR = "_edge_v1_output_computed_flags"
+
+
 class EdgeStateBridgeV1:
     def bootstrap_first_token(
         self,
@@ -28,7 +31,9 @@ class EdgeStateBridgeV1:
     def commit_token(self, session, token_id: int, model_runner) -> None:
         self._ensure_supported_sampling_params(session)
         self._ensure_prompt_computed(session)
+        output_computed_flags = self._output_computed_flags(session)
         session.append_token(int(token_id), computed_delta=1)
+        output_computed_flags.append(True)
         self._sync_request_state(session, model_runner)
 
     def inject_external_token(
@@ -39,7 +44,9 @@ class EdgeStateBridgeV1:
     ) -> None:
         self._ensure_supported_sampling_params(session)
         self._ensure_prompt_computed(session)
+        output_computed_flags = self._output_computed_flags(session)
         session.append_token(int(token_id), computed_delta=0)
+        output_computed_flags.append(False)
         self._sync_request_state(session, model_runner)
 
     def rollback(self, session, rejected_count: int, model_runner) -> None:
@@ -47,9 +54,17 @@ class EdgeStateBridgeV1:
         if rejected_count <= 0:
             return
         self._ensure_prompt_computed(session)
+        output_computed_flags = self._output_computed_flags(session)
+        removed_count = min(rejected_count, len(output_computed_flags))
+        removed_computed_count = 0
+        if removed_count:
+            removed_computed_count = sum(
+                output_computed_flags[-removed_count:]
+            )
+            del output_computed_flags[-removed_count:]
         session.num_computed_tokens = max(
             session.prompt_len,
-            session.num_computed_tokens - rejected_count,
+            session.num_computed_tokens - removed_computed_count,
         )
         session.rollback(rejected_count)
         self._sync_request_state(session, model_runner)
@@ -63,6 +78,25 @@ class EdgeStateBridgeV1:
     def _ensure_prompt_computed(self, session) -> None:
         if session.num_computed_tokens < session.prompt_len:
             session.num_computed_tokens = session.prompt_len
+
+    def _output_computed_flags(self, session) -> list[bool]:
+        output_computed_flags = getattr(
+            session,
+            _OUTPUT_COMPUTED_FLAGS_ATTR,
+            None,
+        )
+        if output_computed_flags is not None:
+            return output_computed_flags
+
+        output_len = len(session.committed_output_ids())
+        computed_output_len = max(
+            0,
+            min(session.num_computed_tokens - session.prompt_len, output_len),
+        )
+        output_computed_flags = ([True] * computed_output_len +
+                                 [False] * (output_len - computed_output_len))
+        setattr(session, _OUTPUT_COMPUTED_FLAGS_ATTR, output_computed_flags)
+        return output_computed_flags
 
     def _sync_request_state(self, session, model_runner) -> None:
         req_state = model_runner.requests[session.req_id]

@@ -55,6 +55,7 @@ def test_inject_external_token_updates_v1_cached_request_and_input_batch() -> No
     req_state = runner.requests["req-1"]
     assert req_state.output_token_ids == [20]
     assert req_state.num_computed_tokens == 2
+    assert runner.input_batch.req_output_token_ids[0] is req_state.output_token_ids
     assert int(runner.input_batch.num_tokens_no_spec[0]) == 3
     assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 2
     assert runner.input_batch.prev_sampled_token_ids is None
@@ -107,3 +108,24 @@ def test_sync_clears_cached_sampled_tokens_without_req_batch_index() -> None:
     assert req_state.num_computed_tokens == 2
     assert runner.input_batch.prev_sampled_token_ids is None
     assert runner.input_batch.prev_req_id_to_index is None
+
+
+def test_rollback_keeps_num_computed_tokens_for_external_tail_token() -> None:
+    bridge = EdgeStateBridgeV1()
+    runner = make_runner()
+    session = make_session()
+
+    bridge.inject_external_token(session, 20, runner)
+    bridge.commit_token(session, 21, runner)
+    bridge.inject_external_token(session, 22, runner)
+
+    bridge.rollback(session, 1, runner)
+
+    req_state = runner.requests["req-1"]
+    assert session.token_ids == [10, 11, 20, 21]
+    assert session.total_len == 4
+    assert session.num_computed_tokens == 3
+    assert req_state.output_token_ids == [20, 21]
+    assert req_state.num_computed_tokens == 3
+    assert int(runner.input_batch.num_tokens_no_spec[0]) == 4
+    assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 3
