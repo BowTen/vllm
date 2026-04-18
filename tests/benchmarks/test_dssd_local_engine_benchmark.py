@@ -38,9 +38,20 @@ def test_local_engine_benchmark_parser_defaults_to_all_and_prompt_len() -> None:
     assert args.engine == "all"
     assert args.prompt_len == 128
     assert args.native_model_runner == "v1"
+    assert args.verifier_model_runner == "v2"
     assert args.phase_timing is False
     assert args.dump_decode_state == 0
     assert args.output_json is None
+
+
+def test_local_engine_benchmark_parser_accepts_verifier_model_runner() -> None:
+    module = _load_module()
+
+    args = module.build_parser().parse_args(
+        ["--model", "/tmp/model", "--verifier-model-runner", "v1"]
+    )
+
+    assert args.verifier_model_runner == "v1"
 
 
 def test_local_engine_benchmark_parser_accepts_auto_output_json() -> None:
@@ -75,6 +86,8 @@ def test_run_subprocess_for_engine_passes_prompt_len_and_json_only(
             "float16",
             "--native-model-runner",
             "v2",
+            "--verifier-model-runner",
+            "v1",
             "--trust-remote-code",
             "--no-enforce-eager",
             "--phase-timing",
@@ -114,12 +127,39 @@ def test_run_subprocess_for_engine_passes_prompt_len_and_json_only(
     assert cmd[cmd.index("--engine") + 1] == "verifier"
     assert cmd[cmd.index("--prompt-len") + 1] == "18"
     assert cmd[cmd.index("--max-new-tokens") + 1] == "32"
+    assert cmd[cmd.index("--verifier-model-runner") + 1] == "v1"
     assert "--json-only" in cmd
     assert "--trust-remote-code" in cmd
     assert "--no-enforce-eager" in cmd
     assert "--phase-timing" in cmd
     assert cmd[cmd.index("--dump-decode-state") + 1] == "3"
     assert "--output-json" not in cmd
+
+
+def test_make_verifier_engine_selects_mrv1_components() -> None:
+    module = _load_module()
+    args = module.build_parser().parse_args(
+        ["--model", "/tmp/model", "--verifier-model-runner", "v1"]
+    )
+    sampler = object()
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(sampler=sampler, num_spec_tokens=0)
+    )
+
+    engine = module._make_verifier_engine(
+        args=args,
+        vllm_config=object(),
+        worker=worker,
+        scheduler=object(),
+    )
+
+    from vllm.dssd.verifier.engine_v1 import VerifierDecodeEngineV1
+    from vllm.dssd.verifier.sampler_v1 import DSSDVerifierSamplerV1
+    from vllm.dssd.verifier.state_bridge_v1 import VerifierStateBridgeV1
+
+    assert isinstance(engine, VerifierDecodeEngineV1)
+    assert isinstance(engine.state_bridge, VerifierStateBridgeV1)
+    assert isinstance(engine.verifier_sampler, DSSDVerifierSamplerV1)
 
 
 def test_benchmark_runtime_engine_aggregates_phase_seconds(

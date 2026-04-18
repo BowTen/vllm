@@ -18,6 +18,20 @@ def test_verifier_server_parser_defaults_to_real_service_factory() -> None:
         args.service_factory
         == "vllm.dssd.entrypoints.runtime_factory.build_real_verifier_service"
     )
+    assert args.model_runner_version == "v2"
+
+
+def test_verifier_server_parser_accepts_model_runner_version() -> None:
+    from vllm.dssd.entrypoints.verifier_server import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--model-runner-version",
+            "v1",
+        ]
+    )
+
+    assert args.model_runner_version == "v1"
 
 
 def test_edge_runner_parser_defaults_to_real_service_factory() -> None:
@@ -117,6 +131,173 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     returned_cleanup()
     assert shutdown_calls == ["shutdown"]
     assert cleanup_calls == ["cleanup"]
+
+
+def test_build_real_verifier_service_selects_v1_backend(monkeypatch) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+                num_spec_tokens=2,
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+    captured = {}
+    init_kwargs = {}
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (
+            init_kwargs.update(kwargs) or (runtime, lambda: None)
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda _config: None,
+    )
+
+    class FakeVerifierStateBridgeV1:
+        pass
+
+    class FakeDSSDVerifierSamplerV1:
+        def __init__(self, sampler) -> None:
+            captured["sampler"] = sampler
+
+    class FakeVerifierDecodeEngineV1:
+        def __init__(self, **kwargs) -> None:
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierStateBridgeV1",
+        FakeVerifierStateBridgeV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "DSSDVerifierSamplerV1",
+        FakeDSSDVerifierSamplerV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierDecodeEngineV1",
+        FakeVerifierDecodeEngineV1,
+        raising=False,
+    )
+
+    service, _cleanup = runtime_factory.build_real_verifier_service(
+        SimpleNamespace(model_runner_version="v1")
+    )
+
+    assert service.decode_engine.__class__ is FakeVerifierDecodeEngineV1
+    assert init_kwargs["use_v2_model_runner"] is False
+    assert isinstance(captured["kwargs"]["state_bridge"], FakeVerifierStateBridgeV1)
+
+
+def test_build_real_verifier_service_rejects_async_v1(monkeypatch) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    init_calls: list[str] = []
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda *args, **kwargs: init_calls.append("called"),
+    )
+
+    with pytest.raises(ValueError, match="async_scheduling=False"):
+        runtime_factory.build_real_verifier_service(
+            SimpleNamespace(
+                model_runner_version="v1",
+                async_scheduling=True,
+            )
+        )
+
+    assert init_calls == []
+
+
+def test_build_real_verifier_service_cleans_up_when_v1_engine_init_fails(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    cleanup_calls: list[str] = []
+    shutdown_calls: list[str] = []
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+                num_spec_tokens=2,
+            ),
+            shutdown=lambda: shutdown_calls.append("shutdown"),
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+
+    def fake_cleanup() -> None:
+        cleanup_calls.append("cleanup")
+        runtime.worker.shutdown()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, fake_cleanup),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda _config: object(),
+    )
+
+    class FakeVerifierStateBridgeV1:
+        pass
+
+    class FakeDSSDVerifierSamplerV1:
+        def __init__(self, sampler) -> None:
+            del sampler
+
+    class FailingVerifierDecodeEngineV1:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            raise RuntimeError("engine init failed")
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierStateBridgeV1",
+        FakeVerifierStateBridgeV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "DSSDVerifierSamplerV1",
+        FakeDSSDVerifierSamplerV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierDecodeEngineV1",
+        FailingVerifierDecodeEngineV1,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="engine init failed"):
+        runtime_factory.build_real_verifier_service(
+            SimpleNamespace(
+                model_runner_version="v1",
+                async_scheduling=False,
+            )
+        )
+
+    assert cleanup_calls == ["cleanup"]
+    assert shutdown_calls == ["shutdown"]
 
 
 def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(

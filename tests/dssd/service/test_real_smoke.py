@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +16,12 @@ from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.dssd.edge import (
     DSSDEdgeDraftSampler,
+    DSSDEdgeDraftSamplerV1,
     EdgeDecodeEngine,
+    EdgeDecodeEngineV1,
     EdgeSchedulerAdapter,
     EdgeStateBridge,
+    EdgeStateBridgeV1,
     EdgeSession,
 )
 from vllm.dssd.protocol import VerifyRoundRequest
@@ -274,6 +278,93 @@ def real_dssd_runtime():
 
 
 @pytest.fixture
+def real_dssd_runtime_v1():
+    if not pytest.importorskip("torch").cuda.is_available():
+        pytest.skip("requires cuda")
+    if not current_platform.is_cuda():
+        pytest.skip("requires a CUDA-resolved vLLM runtime")
+    _skip_if_insufficient_free_gpu_memory(
+        _REAL_SMOKE_MIN_FREE_MIB,
+        "real smoke",
+    )
+
+    old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+    envs.disable_envs_cache()
+
+    from vllm.distributed import cleanup_dist_env_and_memory
+
+    runtime = None
+    try:
+        try:
+            runtime = _init_real_runtime()
+        except _RealRuntimeUnavailable as exc:
+            pytest.skip(f"insufficient GPU memory for real smoke: {exc}")
+        yield runtime
+    finally:
+        if runtime is not None:
+            runtime.worker.shutdown()
+        cleanup_dist_env_and_memory()
+        if old_use_v2_model_runner is None:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        else:
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_use_v2_model_runner
+        envs.disable_envs_cache()
+
+
+@pytest.fixture
+def real_dssd_runtime_v1_edge_v2_verifier():
+    if not pytest.importorskip("torch").cuda.is_available():
+        pytest.skip("requires cuda")
+    if not current_platform.is_cuda():
+        pytest.skip("requires a CUDA-resolved vLLM runtime")
+    _skip_if_insufficient_free_gpu_memory(
+        _REAL_SMOKE_MIN_FREE_MIB,
+        "real smoke",
+    )
+
+    old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+    from vllm.distributed import cleanup_dist_env_and_memory
+
+    edge_runtime = None
+    verifier_runtime = None
+    try:
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+        envs.disable_envs_cache()
+
+        try:
+            edge_runtime = _init_real_runtime()
+
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+            envs.disable_envs_cache()
+            verifier_runtime = _init_real_runtime()
+        except _RealRuntimeUnavailable as exc:
+            if verifier_runtime is not None:
+                verifier_runtime.worker.shutdown()
+                verifier_runtime = None
+            if edge_runtime is not None:
+                edge_runtime.worker.shutdown()
+                edge_runtime = None
+            pytest.skip(f"insufficient GPU memory for real smoke: {exc}")
+
+        yield SimpleNamespace(
+            edge_runtime=edge_runtime,
+            verifier_runtime=verifier_runtime,
+        )
+    finally:
+        if verifier_runtime is not None:
+            verifier_runtime.worker.shutdown()
+        if edge_runtime is not None:
+            edge_runtime.worker.shutdown()
+        cleanup_dist_env_and_memory()
+        if old_use_v2_model_runner is None:
+            os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+        else:
+            os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_use_v2_model_runner
+        envs.disable_envs_cache()
+
+
+@pytest.fixture
 def real_split_dssd_runtime():
     if not pytest.importorskip("torch").cuda.is_available():
         pytest.skip("requires cuda")
@@ -319,6 +410,89 @@ def real_split_dssd_runtime():
         else:
             os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_use_v2_model_runner
         envs.disable_envs_cache()
+
+
+def test_real_dssd_runtime_v1_edge_v2_verifier_fixture_orders_init_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm.distributed as distributed
+
+    trace: list[str] = []
+
+    class _FakeWorker:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.model_runner = SimpleNamespace()
+            if label == "1":
+                self.model_runner.vocab_size = None
+
+        def shutdown(self) -> None:
+            trace.append(f"shutdown:{self.label}")
+
+    def fake_importorskip(module_name: str):
+        assert module_name == "torch"
+        return SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True),
+        )
+
+    def fake_init_real_runtime():
+        label = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
+        trace.append(f"init:{label}")
+        return SimpleNamespace(
+            worker=_FakeWorker(label or "unset"),
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    get_vocab_size=lambda: 7,
+                ),
+            ),
+        )
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "sentinel")
+    monkeypatch.setattr(pytest, "importorskip", fake_importorskip)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_skip_if_insufficient_free_gpu_memory",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_init_real_runtime",
+        fake_init_real_runtime,
+    )
+    monkeypatch.setattr(
+        envs,
+        "disable_envs_cache",
+        lambda: trace.append(
+            f"disable_cache:{os.environ.get('VLLM_USE_V2_MODEL_RUNNER')}"
+        ),
+    )
+    monkeypatch.setattr(
+        distributed,
+        "cleanup_dist_env_and_memory",
+        lambda: trace.append("cleanup"),
+    )
+
+    fixture_gen = real_dssd_runtime_v1_edge_v2_verifier.__wrapped__()
+    runtime_pair = next(fixture_gen)
+    assert runtime_pair.edge_runtime.vllm_config.model_config.get_vocab_size() == 7
+    assert not hasattr(runtime_pair.edge_runtime.worker.model_runner, "vocab_size")
+    assert runtime_pair.verifier_runtime.worker.model_runner.vocab_size is None
+
+    with pytest.raises(StopIteration):
+        next(fixture_gen)
+
+    assert trace == [
+        "disable_cache:0",
+        "init:0",
+        "disable_cache:1",
+        "init:1",
+        "shutdown:1",
+        "shutdown:0",
+        "cleanup",
+        "disable_cache:sentinel",
+    ]
+    assert os.environ["VLLM_USE_V2_MODEL_RUNNER"] == "sentinel"
 
 
 def test_real_service_transport_smoke_target_only(real_dssd_runtime) -> None:
@@ -439,6 +613,7 @@ def _build_real_components_from_runtimes(
     *,
     edge_runtime,
     verifier_runtime,
+    edge_model_runner_version: str = "v2",
     verifier_gamma: int = 0,
     remote_req_id_factory=None,
 ):
@@ -462,14 +637,27 @@ def _build_real_components_from_runtimes(
             num_speculative_steps=verifier_gamma,
         ),
     )
-    edge_engine = EdgeDecodeEngine(
+    if edge_model_runner_version == "v1":
+        edge_engine_cls = EdgeDecodeEngineV1
+        state_bridge = EdgeStateBridgeV1()
+        draft_sampler = DSSDEdgeDraftSamplerV1(edge_sampler)
+    elif edge_model_runner_version == "v2":
+        edge_engine_cls = EdgeDecodeEngine
+        state_bridge = EdgeStateBridge()
+        draft_sampler = DSSDEdgeDraftSampler(edge_sampler)
+    else:
+        raise ValueError(
+            "edge_model_runner_version must be one of {'v1', 'v2'}"
+        )
+
+    edge_engine = edge_engine_cls(
         vllm_config=edge_runtime.vllm_config,
         worker=edge_runtime.worker,
         scheduler=EdgeSchedulerAdapter(
             kv_cache_manager=edge_runtime.kv_cache_manager
         ),
-        state_bridge=EdgeStateBridge(),
-        draft_sampler=DSSDEdgeDraftSampler(edge_sampler),
+        state_bridge=state_bridge,
+        draft_sampler=draft_sampler,
     )
     verifier_service = DSSDVerifierService(decode_engine=verifier_engine)
     transport = InProcessVerifierTransport(
@@ -878,6 +1066,59 @@ def test_real_edge_service_generate_matches_direct_target(
     direct_token_ids = _decode_via_direct_verifier_target_only(
         verifier_engine=verifier_engine,
         req_id="generate-direct",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        output_tokens=3,
+    )
+
+    assert output_ids == direct_token_ids
+
+
+def test_real_edge_service_generate_matches_direct_target_v1(
+    monkeypatch: pytest.MonkeyPatch,
+    real_dssd_runtime_v1_edge_v2_verifier,
+) -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+    import torch
+
+    edge_engine, verifier_engine, transport = _build_real_components_from_runtimes(
+        edge_runtime=real_dssd_runtime_v1_edge_v2_verifier.edge_runtime,
+        verifier_runtime=real_dssd_runtime_v1_edge_v2_verifier.verifier_runtime,
+        edge_model_runner_version="v1",
+        verifier_gamma=1,
+        remote_req_id_factory=lambda req_id: f"{req_id}::verifier",
+    )
+    edge_service = DSSDEdgeService(
+        decode_engine=edge_engine,
+        verifier=transport,
+        eos_token_id=-1,
+        gamma=1,
+    )
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=3,
+        ignore_eos=True,
+    )
+    prompt_token_ids = [1, 2, 3]
+
+    monkeypatch.setattr(
+        torch,
+        "multinomial",
+        lambda probs, num_samples: torch.argmax(
+            probs,
+            dim=-1,
+            keepdim=True,
+        ).to(dtype=torch.int64),
+    )
+
+    output_ids = edge_service.generate(
+        req_id="generate-v1-req",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+    )
+    direct_token_ids = _decode_via_direct_verifier_target_only(
+        verifier_engine=verifier_engine,
+        req_id="generate-v1-direct",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         output_tokens=3,

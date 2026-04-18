@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p, random_sample
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 
 
 class DSSDEdgeDraftSamplerV1:
-    """Single-step draft sampler for the v1 edge path."""
+    """Single-step draft sampler for the old v1 GPU model runner path."""
 
     def __init__(self, sampler) -> None:
         self.sampler = sampler
@@ -15,85 +15,92 @@ class DSSDEdgeDraftSamplerV1:
     def sample_step(
         self,
         logits: torch.Tensor,
-        input_batch: InputBatch,
+        sampling_metadata,
         processed_logits_dst: torch.Tensor,
     ) -> tuple[int, float]:
-        processed_logits = self.apply_sampling_params_into(
-            logits,
-            input_batch,
-            processed_logits_dst,
-        )
-        sampled_token_id = self.sample_token(processed_logits, input_batch)
-        q_value = self.extract_q_value(processed_logits[0], sampled_token_id)
-        return sampled_token_id, q_value
-
-    def apply_sampling_params_into(
-        self,
-        logits: torch.Tensor,
-        input_batch: InputBatch,
-        processed_logits_dst: torch.Tensor,
-    ) -> torch.Tensor:
-        pos = input_batch.positions[input_batch.logits_indices]
-        input_ids = input_batch.input_ids[input_batch.logits_indices]
         processed_logits = processed_logits_dst.view_as(logits)
         processed_logits.copy_(logits)
-
-        self.sampler.logit_bias_state.apply_logit_bias(
-            processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            pos,
-        )
-        self.sampler.penalties_state.apply_penalties(
-            processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            input_ids,
-            input_batch.expanded_local_pos,
-            self.sampler.num_speculative_tokens,
-        )
-        self.sampler.bad_words_state.apply_bad_words(
-            processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-            input_ids,
-            input_batch.expanded_local_pos,
-        )
-        self.sampler.sampling_states.apply_temperature(
-            processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
-        )
-        self.sampler.sampling_states.apply_min_p(
-            processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
+        processed_logits = self._copy_back_if_replaced(
+            processed_logits_dst,
+            logits,
+            self.sampler.apply_logits_processors(
+                processed_logits,
+                sampling_metadata,
+                False,
+            ),
         )
 
-        final_logits = self.sampler.sampling_states.apply_top_k_top_p(
+        sampled, processed_logits = self._sample_with_final_logits(
             processed_logits,
-            input_batch.expanded_idx_mapping,
-            input_batch.idx_mapping_np,
+            sampling_metadata,
         )
-        if final_logits.data_ptr() != processed_logits.data_ptr():
-            processed_logits.copy_(final_logits)
-            final_logits = processed_logits
-        return final_logits
+        token_id = int(sampled.reshape(-1)[0].item())
+        q_value = self.extract_q_value(processed_logits[0], token_id)
+        return token_id, q_value
 
-    def sample_token(
+    def _sample_with_final_logits(
         self,
         processed_logits: torch.Tensor,
-        input_batch: InputBatch,
-    ) -> int:
-        sampled = gumbel_sample(
-            processed_logits[:1],
-            input_batch.expanded_idx_mapping[:1],
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
-            input_batch.positions[input_batch.logits_indices][:1],
-            apply_temperature=False,
+        sampling_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
+
+        if sampling_metadata.all_random:
+            greedy_sampled = None
+        else:
+            greedy_sampled = self.sampler.greedy_sample(processed_logits)
+            if sampling_metadata.all_greedy:
+                return greedy_sampled, processed_logits
+
+        assert sampling_metadata.temperature is not None
+        processed_logits = self.sampler.apply_temperature(
+            processed_logits,
+            sampling_metadata.temperature,
+            sampling_metadata.all_random,
         )
-        return int(sampled.item())
+
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            processed_logits = self._copy_back_if_replaced(
+                processed_logits,
+                processed_logits,
+                processor.apply(processed_logits),
+            )
+
+        processed_logits = self._copy_back_if_replaced(
+            processed_logits,
+            processed_logits,
+            apply_top_k_top_p(
+                processed_logits,
+                sampling_metadata.top_k,
+                sampling_metadata.top_p,
+            ),
+        )
+
+        probs = processed_logits.softmax(dim=-1, dtype=torch.float32)
+        random_sampled = random_sample(probs, sampling_metadata.generators)
+        if greedy_sampled is None:
+            return random_sampled, processed_logits
+
+        sampled = torch.where(
+            sampling_metadata.temperature < _SAMPLING_EPS,
+            greedy_sampled,
+            random_sampled,
+            out=greedy_sampled,
+        )
+        return sampled, processed_logits
+
+    @staticmethod
+    def _copy_back_if_replaced(
+        processed_logits_dst: torch.Tensor,
+        logits_shape_ref: torch.Tensor,
+        maybe_replaced_logits: torch.Tensor | None,
+    ) -> torch.Tensor:
+        processed_logits = processed_logits_dst.view_as(logits_shape_ref)
+        if maybe_replaced_logits is None:
+            return processed_logits
+        if maybe_replaced_logits.data_ptr() != processed_logits.data_ptr():
+            processed_logits.copy_(maybe_replaced_logits)
+        return processed_logits
 
     def extract_q_value(
         self,
@@ -103,16 +110,3 @@ class DSSDEdgeDraftSamplerV1:
         return float(
             torch.softmax(processed_logits_row, dim=-1)[sampled_token_id].item()
         )
-
-    def build_sampled_tokens(
-        self,
-        token_id: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        return torch.tensor([[token_id]], dtype=torch.int64, device=device)
-
-    def build_num_sampled(self, device: torch.device) -> torch.Tensor:
-        return torch.tensor([1], dtype=torch.int32, device=device)
-
-    def build_num_rejected(self, device: torch.device) -> torch.Tensor:
-        return torch.tensor([0], dtype=torch.int32, device=device)

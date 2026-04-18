@@ -86,7 +86,9 @@ def test_package_exports_verifier_types(
         verifier_modules.VerifierRoundState)
     assert verifier_package.__all__ == [
         "DSSDVerifierSampler",
+        "DSSDVerifierSamplerV1",
         "VerifierDecodeEngine",
+        "VerifierDecodeEngineV1",
         "VerifierOpenSessionResult",
         "VerifierRoundRequest",
         "VerifierRoundResult",
@@ -94,22 +96,34 @@ def test_package_exports_verifier_types(
         "VerifierSchedulerAdapter",
         "VerifierSession",
         "VerifierStateBridge",
+        "VerifierStateBridgeV1",
     ]
 
 
 def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
     sampler_class = type("DSSDVerifierSampler", (), {})
+    sampler_v1_class = type("DSSDVerifierSamplerV1", (), {})
     engine_class = type("VerifierDecodeEngine", (), {})
+    engine_v1_class = type("VerifierDecodeEngineV1", (), {})
     scheduler_class = type("VerifierSchedulerAdapter", (), {})
     bridge_class = type("VerifierStateBridge", (), {})
+    bridge_v1_class = type("VerifierStateBridgeV1", (), {})
     extra_modules = {
         "vllm.dssd.verifier.engine": _make_stub_module(
             "vllm.dssd.verifier.engine",
             VerifierDecodeEngine=engine_class,
         ),
+        "vllm.dssd.verifier.engine_v1": _make_stub_module(
+            "vllm.dssd.verifier.engine_v1",
+            VerifierDecodeEngineV1=engine_v1_class,
+        ),
         "vllm.dssd.verifier.sampler": _make_stub_module(
             "vllm.dssd.verifier.sampler",
             DSSDVerifierSampler=sampler_class,
+        ),
+        "vllm.dssd.verifier.sampler_v1": _make_stub_module(
+            "vllm.dssd.verifier.sampler_v1",
+            DSSDVerifierSamplerV1=sampler_v1_class,
         ),
         "vllm.dssd.verifier.scheduler": _make_stub_module(
             "vllm.dssd.verifier.scheduler",
@@ -118,6 +132,10 @@ def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
         "vllm.dssd.verifier.state_bridge": _make_stub_module(
             "vllm.dssd.verifier.state_bridge",
             VerifierStateBridge=bridge_class,
+        ),
+        "vllm.dssd.verifier.state_bridge_v1": _make_stub_module(
+            "vllm.dssd.verifier.state_bridge_v1",
+            VerifierStateBridgeV1=bridge_v1_class,
         ),
     }
     verifier_modules = _load_verifier_modules(
@@ -128,7 +146,9 @@ def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch.dict("sys.modules", extra_modules):
         (
             DSSDVerifierSampler,
+            DSSDVerifierSamplerV1,
             VerifierDecodeEngine,
+            VerifierDecodeEngineV1,
             VerifierOpenSessionResult,
             VerifierRoundRequest,
             VerifierRoundResult,
@@ -136,9 +156,12 @@ def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
             VerifierSchedulerAdapter,
             VerifierSession,
             VerifierStateBridge,
+            VerifierStateBridgeV1,
         ) = (
             verifier_modules.verifier_package.DSSDVerifierSampler,
+            verifier_modules.verifier_package.DSSDVerifierSamplerV1,
             verifier_modules.verifier_package.VerifierDecodeEngine,
+            verifier_modules.verifier_package.VerifierDecodeEngineV1,
             verifier_modules.verifier_package.VerifierOpenSessionResult,
             verifier_modules.verifier_package.VerifierRoundRequest,
             verifier_modules.verifier_package.VerifierRoundResult,
@@ -146,10 +169,13 @@ def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
             verifier_modules.verifier_package.VerifierSchedulerAdapter,
             verifier_modules.verifier_package.VerifierSession,
             verifier_modules.verifier_package.VerifierStateBridge,
+            verifier_modules.verifier_package.VerifierStateBridgeV1,
         )
 
     assert DSSDVerifierSampler is sampler_class
+    assert DSSDVerifierSamplerV1 is sampler_v1_class
     assert VerifierDecodeEngine is engine_class
+    assert VerifierDecodeEngineV1 is engine_v1_class
     assert VerifierOpenSessionResult is verifier_modules.VerifierOpenSessionResult
     assert VerifierRoundRequest is verifier_modules.VerifierRoundRequest
     assert VerifierRoundResult is verifier_modules.VerifierRoundResult
@@ -157,6 +183,7 @@ def test_package_exports_are_stable(monkeypatch: pytest.MonkeyPatch) -> None:
     assert VerifierSchedulerAdapter is scheduler_class
     assert VerifierSession is verifier_modules.VerifierSession
     assert VerifierStateBridge is bridge_class
+    assert VerifierStateBridgeV1 is bridge_v1_class
 
 
 def test_round_request_validate_checks_lengths_and_gamma(

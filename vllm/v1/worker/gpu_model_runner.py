@@ -4140,6 +4140,13 @@ class GPUModelRunner(
                 req_state.output_token_ids.append(-1)
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
+    def take_execute_model_state(self) -> "ExecuteModelState":
+        if self.execute_model_state is None:
+            raise RuntimeError("execute_model_state is empty")
+        state = self.execute_model_state
+        self.execute_model_state = None
+        return state
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None

@@ -33,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ready-file")
     add_runtime_args(parser)
+    parser.add_argument(
+        "--model-runner-version",
+        choices=("v1", "v2"),
+        default="v2",
+    )
     return parser
 
 

@@ -45,9 +45,14 @@ from vllm.dssd.edge import (
     EdgeSchedulerAdapter,
     EdgeStateBridge,
 )
-from vllm.dssd.verifier.engine import VerifierDecodeEngine
-from vllm.dssd.verifier.sampler import DSSDVerifierSampler
-from vllm.dssd.verifier.state_bridge import VerifierStateBridge
+from vllm.dssd.verifier import (
+    DSSDVerifierSampler,
+    DSSDVerifierSamplerV1,
+    VerifierDecodeEngine,
+    VerifierDecodeEngineV1,
+    VerifierStateBridge,
+    VerifierStateBridgeV1,
+)
 from vllm.dssd.verifier.types import VerifierSession
 from vllm.distributed import cleanup_dist_env_and_memory
 import vllm.platforms as platforms
@@ -129,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("v1", "v2"),
         default="v1",
         help="Model runner used by the native engine benchmark.",
+    )
+    parser.add_argument(
+        "--verifier-model-runner",
+        choices=("v1", "v2"),
+        default="v2",
+        help="Model runner used by the verifier engine benchmark.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -584,18 +595,53 @@ class EdgeRuntime:
         envs.disable_envs_cache()
 
 
+def _make_verifier_engine(
+    *,
+    args: argparse.Namespace,
+    vllm_config,
+    worker: Worker,
+    scheduler,
+) -> VerifierDecodeEngine | VerifierDecodeEngineV1:
+    sampler = worker.model_runner.sampler
+    if sampler is None:
+        raise RuntimeError("worker model runner sampler is not initialized")
+
+    if args.verifier_model_runner == "v1":
+        return VerifierDecodeEngineV1(
+            vllm_config=vllm_config,
+            worker=worker,
+            scheduler=scheduler,
+            state_bridge=VerifierStateBridgeV1(),
+            verifier_sampler=DSSDVerifierSamplerV1(sampler),
+        )
+
+    return VerifierDecodeEngine(
+        vllm_config=vllm_config,
+        worker=worker,
+        scheduler=scheduler,
+        state_bridge=VerifierStateBridge(),
+        verifier_sampler=DSSDVerifierSampler(
+            sampler=sampler,
+            num_speculative_steps=worker.model_runner.num_speculative_steps,
+        ),
+    )
+
+
 class VerifierRuntime:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.verifier_model_runner = args.verifier_model_runner
         self.vllm_config = _build_vllm_config(args)
         self._tempfile: tempfile.NamedTemporaryFile[str] | None = None
         self.worker: Worker | None = None
-        self.engine: VerifierDecodeEngine | None = None
+        self.engine: VerifierDecodeEngine | VerifierDecodeEngineV1 | None = None
         self._old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
 
     def __enter__(self) -> "VerifierRuntime":
         require_cuda()
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = (
+            "1" if self.verifier_model_runner == "v2" else "0"
+        )
         envs.disable_envs_cache()
         self._tempfile = tempfile.NamedTemporaryFile(delete=False)
         distributed_init_method = f"file://{self._tempfile.name}"
@@ -640,17 +686,13 @@ class VerifierRuntime:
             self.vllm_config.cache_config.block_size,
             hash_fn,
         )
-        self.engine = VerifierDecodeEngine(
+        self.engine = _make_verifier_engine(
+            args=self.args,
             vllm_config=self.vllm_config,
             worker=self.worker,
             scheduler=BenchmarkVerifierSchedulerAdapter(
                 kv_cache_manager=kv_cache_manager,
                 block_hasher=block_hasher,
-            ),
-            state_bridge=VerifierStateBridge(),
-            verifier_sampler=DSSDVerifierSampler(
-                sampler=self.worker.model_runner.sampler,
-                num_speculative_steps=self.worker.model_runner.num_speculative_steps,
             ),
         )
         return self
@@ -778,6 +820,14 @@ def _run_profiled_verifier_request(
     dump_decode_state_steps: int = 0,
 ) -> tuple[list[int], dict[str, float]]:
     del dump_decode_state_steps
+    if runtime.verifier_model_runner == "v1":
+        return _run_profiled_verifier_v1_request(
+            runtime,
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+        )
+
     engine = runtime.engine
     if engine is None:
         raise RuntimeError("verifier runtime engine is not initialized")
@@ -855,6 +905,119 @@ def _run_profiled_verifier_request(
             phase_seconds["decode_model"] += decode_model_elapsed
             next_token_id, decode_postprocess_elapsed = _timed_phase(
                 lambda: engine._sample_local_token(session)
+            )
+            phase_seconds["decode_postprocess"] += decode_postprocess_elapsed
+            output_token_ids.append(next_token_id)
+            if engine._should_stop_local_generation(
+                sampling_params,
+                next_token_id,
+            ):
+                break
+
+        return output_token_ids, phase_seconds
+    finally:
+        if session is not None:
+            _, phase_seconds["close_session"] = _timed_phase(
+                lambda: engine.close_session(session)
+            )
+
+
+def _run_profiled_verifier_v1_request(
+    runtime: VerifierRuntime,
+    *,
+    req_id: str,
+    prompt_token_ids: list[int],
+    sampling_params: SamplingParams,
+) -> tuple[list[int], dict[str, float]]:
+    engine = runtime.engine
+    if engine is None:
+        raise RuntimeError("verifier runtime engine is not initialized")
+
+    phase_seconds = _new_phase_seconds()
+    output_token_ids: list[int] = []
+    session = None
+    try:
+        def _open_session() -> VerifierSession:
+            return VerifierSession(
+                req_id=req_id,
+                prompt_token_ids=list(prompt_token_ids),
+                sampling_params=sampling_params,
+                block_ids=engine.scheduler.allocate_blocks(
+                    req_id=req_id,
+                    prompt_token_ids=prompt_token_ids,
+                    sampling_params=sampling_params,
+                ),
+                prompt_len=len(prompt_token_ids),
+                token_ids=list(prompt_token_ids),
+            )
+
+        session, phase_seconds["open_session"] = _timed_phase(_open_session)
+
+        max_tokens = sampling_params.max_tokens or 0
+        if max_tokens <= 0:
+            return output_token_ids, phase_seconds
+
+        _, phase_seconds["prefill_execute"] = _timed_phase(
+            lambda: engine._execute(engine.scheduler.build_open_session_step(session))
+        )
+
+        def _bootstrap() -> int:
+            state = engine.model_runner.take_execute_model_state()
+            bootstrap_token_id = engine.verifier_sampler.sample_bootstrap(
+                logits=state.logits,
+                sampling_metadata=engine.model_runner.input_batch.sampling_metadata,
+            )
+            engine.state_bridge.finish_prefill_without_commit(
+                session,
+                engine.model_runner,
+            )
+            engine.sessions[req_id] = session
+            engine.state_bridge.inject_local_token(
+                session,
+                bootstrap_token_id,
+                engine.model_runner,
+                computed_delta=1,
+            )
+            return bootstrap_token_id
+
+        next_token_id, phase_seconds["bootstrap"] = _timed_phase(_bootstrap)
+        output_token_ids = [next_token_id]
+
+        while len(output_token_ids) < max_tokens:
+            def _decode_schedule():
+                engine.state_bridge.prepare_local_decode(
+                    session,
+                    output_token_ids[-1],
+                    engine.model_runner,
+                )
+                return engine.scheduler.build_decode_step(session)
+
+            scheduler_output, decode_schedule_elapsed = _timed_phase(
+                _decode_schedule
+            )
+            phase_seconds["decode_schedule"] += decode_schedule_elapsed
+            _, decode_model_elapsed = _timed_phase(
+                lambda: engine._execute(scheduler_output)
+            )
+            phase_seconds["decode_model"] += decode_model_elapsed
+
+            def _decode_postprocess() -> int:
+                state = engine.model_runner.take_execute_model_state()
+                token_id = engine.verifier_sampler.sample_bootstrap(
+                    logits=state.logits,
+                    sampling_metadata=(
+                        engine.model_runner.input_batch.sampling_metadata
+                    ),
+                )
+                engine.state_bridge.commit_local_token(
+                    session,
+                    token_id,
+                    engine.model_runner,
+                )
+                return token_id
+
+            next_token_id, decode_postprocess_elapsed = _timed_phase(
+                _decode_postprocess
             )
             phase_seconds["decode_postprocess"] += decode_postprocess_elapsed
             output_token_ids.append(next_token_id)
@@ -1124,6 +1287,8 @@ def run_subprocess_for_engine(
         args.dtype,
         "--native-model-runner",
         args.native_model_runner,
+        "--verifier-model-runner",
+        args.verifier_model_runner,
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
         "--max-model-len",

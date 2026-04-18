@@ -105,12 +105,29 @@ def dummy_model_runner() -> GPUModelRunner:
 
 
 @pytest.fixture
-def real_worker():
+def dummy_model_runner_v1():
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.execute_model_state = None
+    runner.requests = {}
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={},
+        token_ids_cpu=torch.zeros((4, 16), dtype=torch.int32).numpy(),
+        num_tokens_no_spec=torch.zeros(4, dtype=torch.int32).numpy(),
+        num_computed_tokens_cpu=torch.zeros(4, dtype=torch.int32).numpy(),
+        sampling_metadata=SimpleNamespace(generators={}),
+    )
+    return runner
+
+
+def _build_real_worker(*, use_v2_model_runner: bool):
     if not torch.cuda.is_available() or not current_platform.is_cuda():
         pytest.skip("requires a CUDA-resolved vLLM runtime")
 
     old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1" if use_v2_model_runner else "0"
     envs.disable_envs_cache()
     try:
         engine_args = EngineArgs(
@@ -135,7 +152,6 @@ def real_worker():
             try:
                 worker.init_device()
                 worker.load_model()
-
                 available_memory = [worker.determine_available_memory()]
                 kv_cache_configs = get_kv_cache_configs(
                     vllm_config,
@@ -166,3 +182,13 @@ def real_worker():
         else:
             os.environ["VLLM_USE_V2_MODEL_RUNNER"] = old_use_v2_model_runner
         envs.disable_envs_cache()
+
+
+@pytest.fixture
+def real_worker():
+    yield from _build_real_worker(use_v2_model_runner=True)
+
+
+@pytest.fixture
+def real_worker_v1():
+    yield from _build_real_worker(use_v2_model_runner=False)

@@ -23,9 +23,12 @@ from vllm.dssd.service import DSSDEdgeService, DSSDVerifierService
 from vllm.dssd.transport import HTTPVerifierTransport
 from vllm.dssd.verifier import (
     DSSDVerifierSampler,
+    DSSDVerifierSamplerV1,
     VerifierDecodeEngine,
+    VerifierDecodeEngineV1,
     VerifierSchedulerAdapter,
     VerifierStateBridge,
+    VerifierStateBridgeV1,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -85,25 +88,48 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_real_verifier_service(args):
-    runtime, cleanup = _init_real_runtime(args, use_v2_model_runner=True)
+    model_runner_version = getattr(args, "model_runner_version", "v2")
+    if model_runner_version not in {"v1", "v2"}:
+        raise ValueError("model_runner_version must be one of {'v1', 'v2'}")
+    async_scheduling = getattr(args, "async_scheduling", False)
+    if model_runner_version == "v1" and async_scheduling:
+        raise ValueError(
+            "model_runner_version='v1' requires async_scheduling=False"
+        )
+
+    runtime, cleanup = _init_real_runtime(
+        args,
+        use_v2_model_runner=(model_runner_version != "v1"),
+    )
     try:
         sampler = runtime.worker.model_runner.sampler
         if sampler is None:
             raise RuntimeError("real verifier runtime requires a sampler")
         block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
-        verifier_engine = VerifierDecodeEngine(
+        if model_runner_version == "v1":
+            verifier_engine_cls = VerifierDecodeEngineV1
+            state_bridge = VerifierStateBridgeV1()
+            verifier_sampler = DSSDVerifierSamplerV1(sampler)
+        else:
+            verifier_engine_cls = VerifierDecodeEngine
+            state_bridge = VerifierStateBridge()
+            verifier_sampler = DSSDVerifierSampler(
+                sampler=sampler,
+                num_speculative_steps=(
+                    runtime.worker.model_runner.num_speculative_steps
+                ),
+            )
+
+        verifier_engine = verifier_engine_cls(
             vllm_config=runtime.vllm_config,
             worker=runtime.worker,
             scheduler=VerifierSchedulerAdapter(
                 kv_cache_manager=runtime.kv_cache_manager,
                 request_block_hasher=block_hasher,
             ),
-            state_bridge=VerifierStateBridge(),
-            verifier_sampler=DSSDVerifierSampler(
-                sampler=sampler,
-                num_speculative_steps=runtime.worker.model_runner.num_speculative_steps,
-            ),
+            state_bridge=state_bridge,
+            verifier_sampler=verifier_sampler,
         )
         return DSSDVerifierService(decode_engine=verifier_engine), cleanup
     except Exception:
