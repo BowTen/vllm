@@ -12,10 +12,12 @@ from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.dssd.edge import (
     DSSDEdgeDraftSampler,
+    DSSDEdgeDraftSamplerV1,
     EdgeDecodeEngine,
     EdgeDecodeEngineV1,
     EdgeSchedulerAdapter,
     EdgeStateBridge,
+    EdgeStateBridgeV1,
 )
 from vllm.dssd.service import DSSDEdgeService, DSSDVerifierService
 from vllm.dssd.transport import HTTPVerifierTransport
@@ -83,70 +85,87 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_real_verifier_service(args):
-    runtime, _cleanup = _init_real_runtime(args, use_v2_model_runner=True)
-    sampler = runtime.worker.model_runner.sampler
-    if sampler is None:
-        raise RuntimeError("real verifier runtime requires a sampler")
-    block_hasher = _make_request_block_hasher(runtime.vllm_config)
+    runtime, cleanup = _init_real_runtime(args, use_v2_model_runner=True)
+    try:
+        sampler = runtime.worker.model_runner.sampler
+        if sampler is None:
+            raise RuntimeError("real verifier runtime requires a sampler")
+        block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
-    verifier_engine = VerifierDecodeEngine(
-        vllm_config=runtime.vllm_config,
-        worker=runtime.worker,
-        scheduler=VerifierSchedulerAdapter(
-            kv_cache_manager=runtime.kv_cache_manager,
-            request_block_hasher=block_hasher,
-        ),
-        state_bridge=VerifierStateBridge(),
-        verifier_sampler=DSSDVerifierSampler(
-            sampler=sampler,
-            num_speculative_steps=runtime.worker.model_runner.num_speculative_steps,
-        ),
-    )
-    return (
-        DSSDVerifierService(decode_engine=verifier_engine),
-        _make_standalone_cleanup(runtime.worker),
-    )
+        verifier_engine = VerifierDecodeEngine(
+            vllm_config=runtime.vllm_config,
+            worker=runtime.worker,
+            scheduler=VerifierSchedulerAdapter(
+                kv_cache_manager=runtime.kv_cache_manager,
+                request_block_hasher=block_hasher,
+            ),
+            state_bridge=VerifierStateBridge(),
+            verifier_sampler=DSSDVerifierSampler(
+                sampler=sampler,
+                num_speculative_steps=runtime.worker.model_runner.num_speculative_steps,
+            ),
+        )
+        return DSSDVerifierService(decode_engine=verifier_engine), cleanup
+    except Exception:
+        with contextlib.suppress(Exception):
+            cleanup()
+        raise
 
 
 def build_real_edge_service(args):
     model_runner_version = getattr(args, "model_runner_version", "v2")
+    if model_runner_version not in {"v1", "v2"}:
+        raise ValueError(
+            "model_runner_version must be one of {'v1', 'v2'}"
+        )
     async_scheduling = getattr(args, "async_scheduling", False)
     if model_runner_version == "v1" and async_scheduling:
         raise ValueError(
             "model_runner_version='v1' requires async_scheduling=False"
         )
 
-    runtime, _cleanup = _init_real_runtime(
+    runtime, cleanup = _init_real_runtime(
         args,
         use_v2_model_runner=(model_runner_version != "v1"),
     )
-    sampler = runtime.worker.model_runner.sampler
-    if sampler is None:
-        raise RuntimeError("real edge runtime requires a sampler")
-    block_hasher = _make_request_block_hasher(runtime.vllm_config)
+    try:
+        sampler = runtime.worker.model_runner.sampler
+        if sampler is None:
+            raise RuntimeError("real edge runtime requires a sampler")
+        block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
-    edge_engine_cls = (
-        EdgeDecodeEngineV1 if model_runner_version == "v1" else EdgeDecodeEngine
-    )
-    edge_engine = edge_engine_cls(
-        vllm_config=runtime.vllm_config,
-        worker=runtime.worker,
-        scheduler=EdgeSchedulerAdapter(
-            kv_cache_manager=runtime.kv_cache_manager,
-            request_block_hasher=block_hasher,
-        ),
-        state_bridge=EdgeStateBridge(),
-        draft_sampler=DSSDEdgeDraftSampler(sampler),
-    )
-    return (
-        DSSDEdgeService(
-            decode_engine=edge_engine,
-            verifier=HTTPVerifierTransport(server_url=args.verifier_url),
-            eos_token_id=args.eos_token_id,
-            gamma=args.gamma,
-        ),
-        _make_standalone_cleanup(runtime.worker),
-    )
+        if model_runner_version == "v1":
+            edge_engine_cls = EdgeDecodeEngineV1
+            state_bridge = EdgeStateBridgeV1()
+            draft_sampler = DSSDEdgeDraftSamplerV1(sampler)
+        else:
+            edge_engine_cls = EdgeDecodeEngine
+            state_bridge = EdgeStateBridge()
+            draft_sampler = DSSDEdgeDraftSampler(sampler)
+
+        edge_engine = edge_engine_cls(
+            vllm_config=runtime.vllm_config,
+            worker=runtime.worker,
+            scheduler=EdgeSchedulerAdapter(
+                kv_cache_manager=runtime.kv_cache_manager,
+                request_block_hasher=block_hasher,
+            ),
+            state_bridge=state_bridge,
+            draft_sampler=draft_sampler,
+        )
+        return (
+            DSSDEdgeService(
+                decode_engine=edge_engine,
+                verifier=HTTPVerifierTransport(server_url=args.verifier_url),
+                eos_token_id=args.eos_token_id,
+                gamma=args.gamma,
+            ),
+            cleanup,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            cleanup()
+        raise
 
 
 def _init_real_runtime(

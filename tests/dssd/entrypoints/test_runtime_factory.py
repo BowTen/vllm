@@ -78,6 +78,7 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     from vllm.dssd.service import DSSDVerifierService
 
     shutdown_calls: list[str] = []
+    cleanup_calls: list[str] = []
     runtime = SimpleNamespace(
         worker=SimpleNamespace(
             model_runner=SimpleNamespace(
@@ -89,10 +90,15 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
         vllm_config=object(),
         kv_cache_manager=None,
     )
+
+    def fake_cleanup() -> None:
+        cleanup_calls.append("cleanup")
+        runtime.worker.shutdown()
+
     monkeypatch.setattr(
         runtime_factory,
         "_init_real_runtime",
-        lambda args, **kwargs: (runtime, object()),
+        lambda args, **kwargs: (runtime, fake_cleanup),
     )
     sentinel_block_hasher = object()
     monkeypatch.setattr(
@@ -110,16 +116,19 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     assert service.decode_engine.scheduler.request_block_hasher is sentinel_block_hasher
     returned_cleanup()
     assert shutdown_calls == ["shutdown"]
+    assert cleanup_calls == ["cleanup"]
 
 
 def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
     monkeypatch,
 ) -> None:
     from vllm.dssd.entrypoints import runtime_factory
+    from vllm.dssd.edge import DSSDEdgeDraftSampler, EdgeStateBridge
     from vllm.dssd.service import DSSDEdgeService
     from vllm.dssd.transport import HTTPVerifierTransport
 
     shutdown_calls: list[str] = []
+    cleanup_calls: list[str] = []
     runtime = SimpleNamespace(
         worker=SimpleNamespace(
             model_runner=SimpleNamespace(
@@ -130,10 +139,15 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
         vllm_config=object(),
         kv_cache_manager=None,
     )
+
+    def fake_cleanup() -> None:
+        cleanup_calls.append("cleanup")
+        runtime.worker.shutdown()
+
     monkeypatch.setattr(
         runtime_factory,
         "_init_real_runtime",
-        lambda args, **kwargs: (runtime, object()),
+        lambda args, **kwargs: (runtime, fake_cleanup),
     )
     sentinel_block_hasher = object()
     monkeypatch.setattr(
@@ -155,10 +169,13 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
     assert service.decode_engine.scheduler.request_block_hasher is sentinel_block_hasher
     assert isinstance(service.verifier, HTTPVerifierTransport)
     assert service.verifier.server_url == "http://127.0.0.1:9000"
+    assert isinstance(service.decode_engine.state_bridge, EdgeStateBridge)
+    assert isinstance(service.decode_engine.draft_sampler, DSSDEdgeDraftSampler)
     assert service.eos_token_id == 2
     assert service.gamma == 3
     returned_cleanup()
     assert shutdown_calls == ["shutdown"]
+    assert cleanup_calls == ["cleanup"]
 
 
 def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
@@ -166,6 +183,7 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
     from vllm.dssd.service import DSSDEdgeService
 
     shutdown_calls: list[str] = []
+    cleanup_calls: list[str] = []
     runtime = SimpleNamespace(
         worker=SimpleNamespace(
             model_runner=SimpleNamespace(
@@ -176,10 +194,15 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
         vllm_config=object(),
         kv_cache_manager=None,
     )
+
+    def fake_cleanup() -> None:
+        cleanup_calls.append("cleanup")
+        runtime.worker.shutdown()
+
     monkeypatch.setattr(
         runtime_factory,
         "_init_real_runtime",
-        lambda args, **kwargs: (runtime, object()),
+        lambda args, **kwargs: (runtime, fake_cleanup),
     )
     sentinel_block_hasher = object()
     monkeypatch.setattr(
@@ -190,6 +213,13 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
 
     created = {}
 
+    class FakeEdgeStateBridgeV1:
+        pass
+
+    class FakeDSSDEdgeDraftSamplerV1:
+        def __init__(self, sampler) -> None:
+            created["draft_sampler_input"] = sampler
+
     class FakeEdgeDecodeEngineV1:
         def __init__(self, **kwargs) -> None:
             created["kwargs"] = kwargs
@@ -198,6 +228,18 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
         runtime_factory,
         "EdgeDecodeEngineV1",
         FakeEdgeDecodeEngineV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "EdgeStateBridgeV1",
+        FakeEdgeStateBridgeV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "DSSDEdgeDraftSamplerV1",
+        FakeDSSDEdgeDraftSamplerV1,
         raising=False,
     )
 
@@ -213,10 +255,15 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
 
     assert isinstance(service, DSSDEdgeService)
     assert isinstance(service.decode_engine, FakeEdgeDecodeEngineV1)
+    assert isinstance(created["kwargs"]["state_bridge"], FakeEdgeStateBridgeV1)
+    assert isinstance(
+        created["kwargs"]["draft_sampler"], FakeDSSDEdgeDraftSamplerV1
+    )
     assert created["kwargs"]["scheduler"].request_block_hasher is sentinel_block_hasher
     assert service.verifier.server_url == "http://127.0.0.1:9000"
     returned_cleanup()
     assert shutdown_calls == ["shutdown"]
+    assert cleanup_calls == ["cleanup"]
 
 
 def test_build_real_edge_service_rejects_async_v1(monkeypatch) -> None:
@@ -259,6 +306,111 @@ def test_build_real_edge_service_rejects_async_v1(monkeypatch) -> None:
                 async_scheduling=True,
             )
         )
+
+
+def test_build_real_edge_service_rejects_invalid_model_runner_version(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    init_calls: list[str] = []
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda *args, **kwargs: init_calls.append("called"),
+    )
+
+    with pytest.raises(ValueError, match="model_runner_version"):
+        runtime_factory.build_real_edge_service(
+            SimpleNamespace(
+                verifier_url="http://127.0.0.1:9000",
+                eos_token_id=2,
+                gamma=3,
+                model_runner_version="v3",
+                async_scheduling=False,
+            )
+        )
+
+    assert init_calls == []
+
+
+def test_build_real_edge_service_cleans_up_when_v1_engine_init_fails(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    cleanup_calls: list[str] = []
+    shutdown_calls: list[str] = []
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+            ),
+            shutdown=lambda: shutdown_calls.append("shutdown"),
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+
+    def fake_cleanup() -> None:
+        cleanup_calls.append("cleanup")
+        runtime.worker.shutdown()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, fake_cleanup),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda vllm_config: object(),
+    )
+
+    class FakeEdgeStateBridgeV1:
+        pass
+
+    class FakeDSSDEdgeDraftSamplerV1:
+        def __init__(self, sampler) -> None:
+            del sampler
+
+    class FailingEdgeDecodeEngineV1:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            raise RuntimeError("engine init failed")
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "EdgeStateBridgeV1",
+        FakeEdgeStateBridgeV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "DSSDEdgeDraftSamplerV1",
+        FakeDSSDEdgeDraftSamplerV1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "EdgeDecodeEngineV1",
+        FailingEdgeDecodeEngineV1,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="engine init failed"):
+        runtime_factory.build_real_edge_service(
+            SimpleNamespace(
+                verifier_url="http://127.0.0.1:9000",
+                eos_token_id=2,
+                gamma=3,
+                model_runner_version="v1",
+                async_scheduling=False,
+            )
+        )
+
+    assert cleanup_calls == ["cleanup"]
+    assert shutdown_calls == ["shutdown"]
 
 
 def test_init_real_runtime_disables_prefix_caching(monkeypatch) -> None:
