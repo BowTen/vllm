@@ -13,6 +13,7 @@ from vllm.config import set_current_vllm_config
 from vllm.dssd.edge import (
     DSSDEdgeDraftSampler,
     EdgeDecodeEngine,
+    EdgeDecodeEngineV1,
     EdgeSchedulerAdapter,
     EdgeStateBridge,
 )
@@ -82,7 +83,7 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_real_verifier_service(args):
-    runtime, _cleanup = _init_real_runtime(args)
+    runtime, _cleanup = _init_real_runtime(args, use_v2_model_runner=True)
     sampler = runtime.worker.model_runner.sampler
     if sampler is None:
         raise RuntimeError("real verifier runtime requires a sampler")
@@ -108,13 +109,26 @@ def build_real_verifier_service(args):
 
 
 def build_real_edge_service(args):
-    runtime, _cleanup = _init_real_runtime(args)
+    model_runner_version = getattr(args, "model_runner_version", "v2")
+    async_scheduling = getattr(args, "async_scheduling", False)
+    if model_runner_version == "v1" and async_scheduling:
+        raise ValueError(
+            "model_runner_version='v1' requires async_scheduling=False"
+        )
+
+    runtime, _cleanup = _init_real_runtime(
+        args,
+        use_v2_model_runner=(model_runner_version != "v1"),
+    )
     sampler = runtime.worker.model_runner.sampler
     if sampler is None:
         raise RuntimeError("real edge runtime requires a sampler")
     block_hasher = _make_request_block_hasher(runtime.vllm_config)
 
-    edge_engine = EdgeDecodeEngine(
+    edge_engine_cls = (
+        EdgeDecodeEngineV1 if model_runner_version == "v1" else EdgeDecodeEngine
+    )
+    edge_engine = edge_engine_cls(
         vllm_config=runtime.vllm_config,
         worker=runtime.worker,
         scheduler=EdgeSchedulerAdapter(
@@ -135,9 +149,13 @@ def build_real_edge_service(args):
     )
 
 
-def _init_real_runtime(args) -> tuple[SimpleNamespace, Callable[[], None]]:
+def _init_real_runtime(
+    args,
+    *,
+    use_v2_model_runner: bool = True,
+) -> tuple[SimpleNamespace, Callable[[], None]]:
     old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1" if use_v2_model_runner else "0"
     envs.disable_envs_cache()
 
     worker = None

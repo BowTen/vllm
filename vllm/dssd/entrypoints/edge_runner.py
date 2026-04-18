@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eos-token-id", type=int, required=True)
     parser.add_argument("--gamma", type=int, required=True)
     add_runtime_args(parser)
+    parser.add_argument(
+        "--model-runner-version",
+        choices=("v1", "v2"),
+        default="v2",
+    )
     return parser
 
 
