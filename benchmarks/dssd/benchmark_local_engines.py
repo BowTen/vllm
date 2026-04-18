@@ -41,9 +41,12 @@ from vllm import LLM, SamplingParams, TokensPrompt, envs
 from vllm.config import set_current_vllm_config
 from vllm.dssd.edge import (
     DSSDEdgeDraftSampler,
+    DSSDEdgeDraftSamplerV1,
     EdgeDecodeEngine,
+    EdgeDecodeEngineV1,
     EdgeSchedulerAdapter,
     EdgeStateBridge,
+    EdgeStateBridgeV1,
 )
 from vllm.dssd.verifier import (
     DSSDVerifierSampler,
@@ -134,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("v1", "v2"),
         default="v1",
         help="Model runner used by the native engine benchmark.",
+    )
+    parser.add_argument(
+        "--edge-model-runner",
+        choices=("v1", "v2"),
+        default="v2",
+        help="Model runner used by the edge engine benchmark.",
     )
     parser.add_argument(
         "--verifier-model-runner",
@@ -504,15 +513,18 @@ def _build_vllm_config(args: argparse.Namespace):
 class EdgeRuntime:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.edge_model_runner = args.edge_model_runner
         self.vllm_config = _build_vllm_config(args)
         self._tempfile: tempfile.NamedTemporaryFile[str] | None = None
         self.worker: Worker | None = None
-        self.engine: EdgeDecodeEngine | None = None
+        self.engine: EdgeDecodeEngine | EdgeDecodeEngineV1 | None = None
         self._old_use_v2_model_runner = os.environ.get("VLLM_USE_V2_MODEL_RUNNER")
 
     def __enter__(self) -> "EdgeRuntime":
         require_cuda()
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = (
+            "1" if self.edge_model_runner == "v2" else "0"
+        )
         envs.disable_envs_cache()
         os.environ.setdefault("RANK", "0")
         os.environ.setdefault("LOCAL_RANK", "0")
@@ -564,15 +576,11 @@ class EdgeRuntime:
             dcp_world_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pcp_world_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
         )
-        sampler = self.worker.model_runner.sampler
-        if sampler is None:
-            raise RuntimeError("worker model runner sampler is not initialized")
-        self.engine = EdgeDecodeEngine(
+        self.engine = _make_edge_engine(
+            args=self.args,
             vllm_config=self.vllm_config,
             worker=self.worker,
-            scheduler=EdgeSchedulerAdapter(kv_cache_manager=kv_cache_manager),
-            state_bridge=EdgeStateBridge(),
-            draft_sampler=DSSDEdgeDraftSampler(sampler),
+            kv_cache_manager=kv_cache_manager,
         )
         return self
 
@@ -593,6 +601,36 @@ class EdgeRuntime:
         else:
             os.environ["VLLM_USE_V2_MODEL_RUNNER"] = self._old_use_v2_model_runner
         envs.disable_envs_cache()
+
+
+def _make_edge_engine(
+    *,
+    args: argparse.Namespace,
+    vllm_config,
+    worker: Worker,
+    kv_cache_manager: KVCacheManager,
+) -> EdgeDecodeEngine | EdgeDecodeEngineV1:
+    sampler = worker.model_runner.sampler
+    if sampler is None:
+        raise RuntimeError("worker model runner sampler is not initialized")
+
+    scheduler = EdgeSchedulerAdapter(kv_cache_manager=kv_cache_manager)
+    if args.edge_model_runner == "v1":
+        return EdgeDecodeEngineV1(
+            vllm_config=vllm_config,
+            worker=worker,
+            scheduler=scheduler,
+            state_bridge=EdgeStateBridgeV1(),
+            draft_sampler=DSSDEdgeDraftSamplerV1(sampler),
+        )
+
+    return EdgeDecodeEngine(
+        vllm_config=vllm_config,
+        worker=worker,
+        scheduler=scheduler,
+        state_bridge=EdgeStateBridge(),
+        draft_sampler=DSSDEdgeDraftSampler(sampler),
+    )
 
 
 def _make_verifier_engine(
@@ -1287,6 +1325,8 @@ def run_subprocess_for_engine(
         args.dtype,
         "--native-model-runner",
         args.native_model_runner,
+        "--edge-model-runner",
+        args.edge_model_runner,
         "--verifier-model-runner",
         args.verifier_model_runner,
         "--gpu-memory-utilization",
