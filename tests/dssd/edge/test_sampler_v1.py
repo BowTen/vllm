@@ -151,10 +151,14 @@ def test_sample_step_copies_replaced_processed_logits_back_into_destination_buff
     input_batch = make_input_batch()
     logits = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float16)
     processed_logits_dst = torch.full((1, 3), -999.0, dtype=torch.float32)
+    observed = {}
 
     monkeypatch.setattr(
         "vllm.dssd.edge.sampler_v1.gumbel_sample",
-        lambda *args, **kwargs: torch.tensor([1], dtype=torch.int64),
+        lambda logits_arg, *_args, **_kwargs: (
+            observed.setdefault("logits", logits_arg),
+            torch.tensor([1], dtype=torch.int64),
+        )[1],
     )
 
     sampled_token_id, q_value = sampler.sample_step(
@@ -173,3 +177,5 @@ def test_sample_step_copies_replaced_processed_logits_back_into_destination_buff
     assert torch.equal(processed_logits_dst, expected_processed_logits)
     assert returned_logits.data_ptr() != processed_logits_dst.data_ptr()
     assert torch.equal(returned_logits, expected_processed_logits)
+    assert observed["logits"].data_ptr() == processed_logits_dst.data_ptr()
+    assert torch.equal(observed["logits"], expected_processed_logits[:1])
