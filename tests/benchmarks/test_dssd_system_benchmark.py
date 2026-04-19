@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -84,6 +85,19 @@ def test_dssd_system_benchmark_parser_accepts_model_runner_flags() -> None:
 
     assert args.edge_model_runner == "v2"
     assert args.verifier_model_runner == "v2"
+
+
+def test_dssd_system_benchmark_parser_accepts_prompt_jsonl_flag() -> None:
+    module = _load_module()
+
+    args = module.build_parser().parse_args(
+        [
+            "--prompt-jsonl",
+            "/tmp/prompts.jsonl",
+        ]
+    )
+
+    assert args.prompt_jsonl == "/tmp/prompts.jsonl"
 
 
 def test_dssd_system_benchmark_parser_accepts_network_simulation_flags() -> None:
@@ -478,24 +492,111 @@ def test_dssd_system_decode_counter_handles_multi_token_rounds() -> None:
     assert counter.is_complete()
 
 
-def test_dssd_system_summary_includes_acceptance_metrics() -> None:
+def test_build_prompt_token_ids_reads_and_truncates_prompt_jsonl(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _load_module()
+    prompt_path = tmp_path / "prompts.jsonl"
+    prompt_path.write_text(
+        "\n".join(
+            [
+                "",
+                json.dumps({"prompt": "first prompt", "output_tokens": 16}),
+                json.dumps({"prompt": "second prompt", "output_tokens": 32}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            captured["text"] = text
+            captured["add_special_tokens"] = add_special_tokens
+            return [11, 12, 13, 14, 15, 16]
+
+    import transformers
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+
+    token_ids = module._build_prompt_token_ids(
+        "/tmp/model",
+        prompt_len=4,
+        prompt_jsonl=str(prompt_path),
+    )
+
+    assert token_ids == [11, 12, 13, 14]
+    assert captured["text"] == "first prompt"
+    assert captured["add_special_tokens"] is False
+
+
+def test_build_prompt_token_ids_rejects_short_prompt_jsonl_prompt(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _load_module()
+    prompt_path = tmp_path / "prompts.jsonl"
+    prompt_path.write_text(
+        json.dumps({"prompt": "short", "output_tokens": 16}) + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [21, 22]
+
+    import transformers
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+
+    with pytest.raises(ValueError, match="shorter than --prompt-len"):
+        module._build_prompt_token_ids(
+            "/tmp/model",
+            prompt_len=4,
+            prompt_jsonl=str(prompt_path),
+        )
+
+
+def test_dssd_system_summary_includes_timing_and_acceptance_metrics() -> None:
     module = _load_module()
 
     summary = module._summarize(
         [
             module.RepeatResult(
-                total_s=1.0,
-                tokens_per_s=10.0,
-                per_token_ms=100.0,
+                request_total_s=4.0,
+                request_tokens_per_s=2.5,
+                request_per_token_ms=400.0,
+                decode_total_s=2.0,
+                decode_tokens_per_s=5.0,
+                decode_per_token_ms=200.0,
+                verify_path_total_s=1.0,
+                verify_path_tokens_per_s=10.0,
+                verify_path_per_token_ms=100.0,
                 token_ids=[1, 2],
                 draft_acceptance_rate=0.5,
                 all_accept_round_rate=0.25,
                 avg_accepted_len_per_round=1.5,
             ),
             module.RepeatResult(
-                total_s=2.0,
-                tokens_per_s=20.0,
-                per_token_ms=50.0,
+                request_total_s=2.0,
+                request_tokens_per_s=5.0,
+                request_per_token_ms=200.0,
+                decode_total_s=1.0,
+                decode_tokens_per_s=10.0,
+                decode_per_token_ms=100.0,
+                verify_path_total_s=0.5,
+                verify_path_tokens_per_s=20.0,
+                verify_path_per_token_ms=50.0,
                 token_ids=[3, 4],
                 draft_acceptance_rate=0.75,
                 all_accept_round_rate=0.5,
@@ -504,9 +605,130 @@ def test_dssd_system_summary_includes_acceptance_metrics() -> None:
         ]
     )
 
+    assert summary["mean_request_tokens_per_s"] == pytest.approx(3.75)
+    assert summary["mean_request_total_s"] == pytest.approx(3.0)
+    assert summary["mean_decode_tokens_per_s"] == pytest.approx(7.5)
+    assert summary["mean_decode_total_s"] == pytest.approx(1.5)
+    assert summary["mean_verify_path_tokens_per_s"] == pytest.approx(15.0)
+    assert summary["mean_verify_path_total_s"] == pytest.approx(0.75)
     assert summary["mean_draft_acceptance_rate"] == pytest.approx(0.625)
     assert summary["mean_all_accept_round_rate"] == pytest.approx(0.375)
     assert summary["mean_avg_accepted_len_per_round"] == pytest.approx(2.0)
+
+
+def test_dssd_system_benchmark_skips_warmup_repeats(monkeypatch, tmp_path) -> None:
+    module = _load_module()
+    open_calls: list[str] = []
+
+    class FakeProc:
+        pass
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.generated_ids: list[int] = []
+
+        def committed_output_ids(self) -> list[int]:
+            return list(self.generated_ids)
+
+    class FakeDecodeEngine:
+        def __init__(self) -> None:
+            self.sessions: dict[str, FakeSession] = {}
+
+        def draft(self, session, next_token, gamma):
+            return type(
+                "RoundState",
+                (),
+                {
+                    "draft_token_ids": [next_token + 1],
+                    "draft_q_values": [0.0],
+                },
+            )()
+
+    class FakeVerifier:
+        def verify_round(self, request):
+            return type("VerifyResponse", (), {"accepted_len": 1})()
+
+    class FakeEdgeService:
+        def __init__(self) -> None:
+            self.decode_engine = FakeDecodeEngine()
+            self.verifier = FakeVerifier()
+
+        def open_session(self, *, req_id, prompt_token_ids, sampling_params):
+            open_calls.append(req_id)
+            self.decode_engine.sessions[req_id] = FakeSession()
+            return type("OpenedSession", (), {"bootstrap_token_id": 100})()
+
+        def _commit_verify_result(self, session, response):
+            next_token = 200 + len(session.generated_ids)
+            session.generated_ids.append(next_token)
+            return next_token, None
+
+        def close_session(self, req_id):
+            self.decode_engine.sessions.pop(req_id, None)
+
+    perf_values = iter([
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+    ])
+
+    monkeypatch.setattr(
+        module,
+        "_start_verifier_server",
+        lambda config: (FakeProc(), "http://127.0.0.1:18021", tmp_path),
+    )
+    monkeypatch.setattr(
+        module,
+        "_build_edge_service",
+        lambda config, server_url: (FakeEdgeService(), None),
+    )
+    monkeypatch.setattr(module, "_stop_process", lambda proc: None)
+    monkeypatch.setattr(module, "_synchronize", lambda: None)
+    monkeypatch.setattr(
+        module.time,
+        "perf_counter",
+        lambda: next(perf_values),
+    )
+
+    config = module.BenchmarkConfig(
+        model="/tmp/model",
+        edge_model="/tmp/model",
+        verifier_model="/tmp/model",
+        edge_model_runner="v1",
+        verifier_model_runner="v1",
+        edge_cuda_visible_devices="0",
+        verifier_cuda_visible_devices="1",
+        verifier_host="127.0.0.1",
+        verifier_port=18021,
+        prompt_len=8,
+        decode_tokens=1,
+        warmup_tokens=0,
+        warmup_repeats=1,
+        repeats=1,
+        gamma=1,
+        gpu_memory_utilization=0.9,
+        max_model_len=32,
+        kv_cache_memory_bytes=None,
+        max_num_batched_tokens=8,
+        max_num_seqs=2,
+        enforce_eager=False,
+        async_scheduling=False,
+    )
+
+    results = module._run_dssd_benchmark(config, [1] * 8)
+
+    assert len(open_calls) == 2
+    assert len(results) == 1
+    assert results[0].request_total_s == pytest.approx(4.0)
+    assert results[0].decode_total_s == pytest.approx(2.0)
+    assert results[0].verify_path_total_s == pytest.approx(1.0)
 
 
 def test_dssd_system_benchmark_stops_verifier_and_skips_edge_cleanup(

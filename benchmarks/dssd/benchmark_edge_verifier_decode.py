@@ -69,6 +69,8 @@ class BenchmarkConfig:
     max_num_seqs: int
     enforce_eager: bool
     async_scheduling: bool
+    warmup_repeats: int = 0
+    prompt_jsonl: str | None = None
     request_latency_ms: float = 0.0
     request_bandwidth_bytes_per_s: float | None = None
     response_latency_ms: float = 0.0
@@ -78,9 +80,15 @@ class BenchmarkConfig:
 
 @dataclass
 class RepeatResult:
-    total_s: float
-    tokens_per_s: float
-    per_token_ms: float
+    request_total_s: float
+    request_tokens_per_s: float
+    request_per_token_ms: float
+    decode_total_s: float
+    decode_tokens_per_s: float
+    decode_per_token_ms: float
+    verify_path_total_s: float
+    verify_path_tokens_per_s: float
+    verify_path_per_token_ms: float
     token_ids: list[int]
     draft_acceptance_rate: float
     all_accept_round_rate: float
@@ -172,6 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt token length used for prefill.",
     )
     parser.add_argument(
+        "--prompt-jsonl",
+        default=None,
+        help=(
+            "Optional JSONL file containing real prompts. The benchmark uses "
+            "the first non-empty prompt and truncates it to --prompt-len tokens."
+        ),
+    )
+    parser.add_argument(
         "--decode-tokens",
         type=int,
         default=128,
@@ -181,13 +197,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--warmup-tokens",
         type=int,
         default=16,
-        help="Decode tokens to run after bootstrap before timing starts.",
+        help=(
+            "Decode tokens to run after bootstrap before decode/verify-path "
+            "timing starts. These tokens are still included in request timing."
+        ),
     )
     parser.add_argument(
         "--repeats",
         type=int,
         default=3,
         help="Measured repeats.",
+    )
+    parser.add_argument(
+        "--warmup-repeats",
+        type=int,
+        default=0,
+        help="Full requests to run before timing repeats. Excluded from results.",
     )
     parser.add_argument(
         "--gamma",
@@ -277,17 +302,60 @@ def _resolve_default_model() -> str:
     return "Qwen/Qwen3-0.6B"
 
 
-def _build_prompt_token_ids(model: str, prompt_len: int) -> list[int]:
+def _load_prompt_text_from_jsonl(prompt_jsonl: str) -> str:
+    prompt_path = Path(prompt_jsonl)
+    with prompt_path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                item = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{prompt_path}:{line_number}: invalid JSON"
+                ) from exc
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"{prompt_path}:{line_number}: expected JSON object"
+                )
+            prompt = item.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError(
+                    f"{prompt_path}:{line_number}: JSON object must contain a "
+                    "non-empty string 'prompt'"
+                )
+            return prompt
+    raise ValueError(f"{prompt_path}: no prompt found")
+
+
+def _build_prompt_token_ids(
+    model: str,
+    prompt_len: int,
+    prompt_jsonl: str | None = None,
+) -> list[int]:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
         model,
         local_files_only=Path(model).exists(),
     )
-    seed_text = "Benchmark prompt. " * max(prompt_len, 64)
+    seed_text = (
+        _load_prompt_text_from_jsonl(prompt_jsonl)
+        if prompt_jsonl is not None
+        else "Benchmark prompt. " * max(prompt_len, 64)
+    )
     token_ids = tokenizer.encode(seed_text, add_special_tokens=False)
     if not token_ids:
         raise RuntimeError("tokenizer returned no prompt tokens")
+    if prompt_jsonl is not None:
+        if len(token_ids) < prompt_len:
+            raise ValueError(
+                "prompt-jsonl prompt tokenized to "
+                f"{len(token_ids)} tokens, shorter than --prompt-len "
+                f"{prompt_len}"
+            )
+        return token_ids[:prompt_len]
 
     prompt_token_ids: list[int] = []
     while len(prompt_token_ids) < prompt_len:
@@ -619,11 +687,16 @@ def _run_dssd_benchmark(
         verifier_proc, server_url, ready_dir = _start_verifier_server(config)
         edge_service, edge_cleanup = _build_edge_service(config, server_url)
 
-        for repeat_idx in range(config.repeats):
+        total_repeats = config.warmup_repeats + config.repeats
+        for repeat_idx in range(total_repeats):
             req_id = f"dssd-{repeat_idx}-{time.time_ns()}"
             sampling_params = _make_sampling_params(
                 1 + config.warmup_tokens + config.decode_tokens + max(config.gamma, 1)
             )
+            from vllm.dssd.protocol import VerifyRoundRequest
+
+            _synchronize()
+            request_t0 = time.perf_counter()
             opened = edge_service.open_session(
                 req_id=req_id,
                 prompt_token_ids=prompt_token_ids,
@@ -638,7 +711,8 @@ def _run_dssd_benchmark(
             counter.consume([next_token])
 
             measured_token_ids: list[int] = []
-            measured_total_s = 0.0
+            measured_decode_total_s = 0.0
+            measured_verify_path_total_s = 0.0
             total_rounds = 0
             all_accept_rounds = 0
             total_draft_tokens = 0
@@ -646,16 +720,16 @@ def _run_dssd_benchmark(
             try:
                 while not counter.is_complete():
                     output_len_before = len(session.committed_output_ids())
+                    _synchronize()
+                    round_t0 = time.perf_counter()
                     round_state = edge_service.decode_engine.draft(
                         session,
                         next_token,
                         config.gamma,
                     )
 
-                    from vllm.dssd.protocol import VerifyRoundRequest
-
                     _synchronize()
-                    t0 = time.perf_counter()
+                    verify_path_t0 = time.perf_counter()
                     response = edge_service.verifier.verify_round(
                         VerifyRoundRequest(
                             req_id=req_id,
@@ -675,7 +749,9 @@ def _run_dssd_benchmark(
                         response,
                     )
                     _synchronize()
-                    step_s = time.perf_counter() - t0
+                    round_end = time.perf_counter()
+                    round_s = round_end - round_t0
+                    verify_path_s = round_end - verify_path_t0
 
                     new_output_ids = list(
                         session.committed_output_ids()[output_len_before:]
@@ -683,31 +759,59 @@ def _run_dssd_benchmark(
                     measured_step_token_ids = counter.consume(new_output_ids)
                     if measured_step_token_ids:
                         measured_token_ids.extend(measured_step_token_ids)
-                        measured_total_s += step_s
+                        measured_decode_total_s += round_s
+                        measured_verify_path_total_s += verify_path_s
 
-                results.append(
-                    RepeatResult(
-                        total_s=measured_total_s,
-                        tokens_per_s=config.decode_tokens / measured_total_s,
-                        per_token_ms=measured_total_s * 1000.0 / config.decode_tokens,
-                        token_ids=measured_token_ids,
-                        draft_acceptance_rate=(
-                            total_accepted_tokens / total_draft_tokens
-                            if total_draft_tokens > 0
-                            else 0.0
-                        ),
-                        all_accept_round_rate=(
-                            all_accept_rounds / total_rounds
-                            if total_rounds > 0
-                            else 0.0
-                        ),
-                        avg_accepted_len_per_round=(
-                            total_accepted_tokens / total_rounds
-                            if total_rounds > 0
-                            else 0.0
-                        ),
+                _synchronize()
+                request_total_s = time.perf_counter() - request_t0
+
+                if repeat_idx >= config.warmup_repeats:
+                    results.append(
+                        RepeatResult(
+                            request_total_s=request_total_s,
+                            request_tokens_per_s=(
+                                config.decode_tokens / request_total_s
+                            ),
+                            request_per_token_ms=(
+                                request_total_s * 1000.0 / config.decode_tokens
+                            ),
+                            decode_total_s=measured_decode_total_s,
+                            decode_tokens_per_s=(
+                                config.decode_tokens / measured_decode_total_s
+                            ),
+                            decode_per_token_ms=(
+                                measured_decode_total_s
+                                * 1000.0
+                                / config.decode_tokens
+                            ),
+                            verify_path_total_s=measured_verify_path_total_s,
+                            verify_path_tokens_per_s=(
+                                config.decode_tokens
+                                / measured_verify_path_total_s
+                            ),
+                            verify_path_per_token_ms=(
+                                measured_verify_path_total_s
+                                * 1000.0
+                                / config.decode_tokens
+                            ),
+                            token_ids=measured_token_ids,
+                            draft_acceptance_rate=(
+                                total_accepted_tokens / total_draft_tokens
+                                if total_draft_tokens > 0
+                                else 0.0
+                            ),
+                            all_accept_round_rate=(
+                                all_accept_rounds / total_rounds
+                                if total_rounds > 0
+                                else 0.0
+                            ),
+                            avg_accepted_len_per_round=(
+                                total_accepted_tokens / total_rounds
+                                if total_rounds > 0
+                                else 0.0
+                            ),
+                        )
                     )
-                )
             finally:
                 if req_id in edge_service.decode_engine.sessions:
                     edge_service.close_session(req_id)
@@ -727,22 +831,50 @@ def _run_dssd_benchmark(
 
 
 def _summarize(results: list[RepeatResult]) -> dict[str, float]:
-    throughputs = [result.tokens_per_s for result in results]
-    latencies = [result.per_token_ms for result in results]
-    totals = [result.total_s for result in results]
+    request_throughputs = [result.request_tokens_per_s for result in results]
+    request_latencies = [result.request_per_token_ms for result in results]
+    request_totals = [result.request_total_s for result in results]
+    decode_throughputs = [result.decode_tokens_per_s for result in results]
+    decode_latencies = [result.decode_per_token_ms for result in results]
+    decode_totals = [result.decode_total_s for result in results]
+    verify_path_throughputs = [
+        result.verify_path_tokens_per_s for result in results
+    ]
+    verify_path_latencies = [
+        result.verify_path_per_token_ms for result in results
+    ]
+    verify_path_totals = [result.verify_path_total_s for result in results]
     draft_acceptance_rates = [result.draft_acceptance_rate for result in results]
     all_accept_round_rates = [result.all_accept_round_rate for result in results]
     avg_accepted_lens = [result.avg_accepted_len_per_round for result in results]
     return {
-        "mean_tokens_per_s": statistics.mean(throughputs),
-        "stdev_tokens_per_s": statistics.stdev(throughputs)
-        if len(throughputs) > 1
+        "mean_request_tokens_per_s": statistics.mean(request_throughputs),
+        "stdev_request_tokens_per_s": statistics.stdev(request_throughputs)
+        if len(request_throughputs) > 1
         else 0.0,
-        "mean_per_token_ms": statistics.mean(latencies),
-        "stdev_per_token_ms": statistics.stdev(latencies)
-        if len(latencies) > 1
+        "mean_request_per_token_ms": statistics.mean(request_latencies),
+        "stdev_request_per_token_ms": statistics.stdev(request_latencies)
+        if len(request_latencies) > 1
         else 0.0,
-        "mean_total_s": statistics.mean(totals),
+        "mean_request_total_s": statistics.mean(request_totals),
+        "mean_decode_tokens_per_s": statistics.mean(decode_throughputs),
+        "stdev_decode_tokens_per_s": statistics.stdev(decode_throughputs)
+        if len(decode_throughputs) > 1
+        else 0.0,
+        "mean_decode_per_token_ms": statistics.mean(decode_latencies),
+        "stdev_decode_per_token_ms": statistics.stdev(decode_latencies)
+        if len(decode_latencies) > 1
+        else 0.0,
+        "mean_decode_total_s": statistics.mean(decode_totals),
+        "mean_verify_path_tokens_per_s": statistics.mean(verify_path_throughputs),
+        "stdev_verify_path_tokens_per_s": statistics.stdev(verify_path_throughputs)
+        if len(verify_path_throughputs) > 1
+        else 0.0,
+        "mean_verify_path_per_token_ms": statistics.mean(verify_path_latencies),
+        "stdev_verify_path_per_token_ms": statistics.stdev(verify_path_latencies)
+        if len(verify_path_latencies) > 1
+        else 0.0,
+        "mean_verify_path_total_s": statistics.mean(verify_path_totals),
         "mean_draft_acceptance_rate": statistics.mean(draft_acceptance_rates),
         "mean_all_accept_round_rate": statistics.mean(all_accept_round_rates),
         "mean_avg_accepted_len_per_round": statistics.mean(avg_accepted_lens),
@@ -755,18 +887,21 @@ def _print_results(label: str, results: list[RepeatResult]) -> None:
     for idx, result in enumerate(results, 1):
         print(
             f"repeat={idx} "
-            f"tokens/s={result.tokens_per_s:.2f} "
-            f"per_token_ms={result.per_token_ms:.3f} "
-            f"total_s={result.total_s:.4f} "
+            f"request_tokens/s={result.request_tokens_per_s:.2f} "
+            f"request_total_s={result.request_total_s:.4f} "
+            f"decode_tokens/s={result.decode_tokens_per_s:.2f} "
+            f"decode_total_s={result.decode_total_s:.4f} "
+            f"verify_path_tokens/s={result.verify_path_tokens_per_s:.2f} "
+            f"verify_path_total_s={result.verify_path_total_s:.4f} "
             f"draft_accept={result.draft_acceptance_rate:.3f} "
             f"all_accept_round={result.all_accept_round_rate:.3f} "
             f"avg_accepted_len={result.avg_accepted_len_per_round:.3f}"
         )
     print(
         "summary "
-        f"mean_tokens/s={summary['mean_tokens_per_s']:.2f} "
-        f"stdev_tokens/s={summary['stdev_tokens_per_s']:.2f} "
-        f"mean_per_token_ms={summary['mean_per_token_ms']:.3f} "
+        f"mean_request_tokens/s={summary['mean_request_tokens_per_s']:.2f} "
+        f"mean_decode_tokens/s={summary['mean_decode_tokens_per_s']:.2f} "
+        f"mean_verify_path_tokens/s={summary['mean_verify_path_tokens_per_s']:.2f} "
         f"mean_draft_accept={summary['mean_draft_acceptance_rate']:.3f} "
         f"mean_all_accept_round={summary['mean_all_accept_round_rate']:.3f}"
     )
@@ -785,7 +920,11 @@ def main() -> None:
 
     edge_model = args.edge_model or args.model
     verifier_model = args.verifier_model or args.model
-    prompt_token_ids = _build_prompt_token_ids(edge_model, args.prompt_len)
+    prompt_token_ids = _build_prompt_token_ids(
+        edge_model,
+        args.prompt_len,
+        args.prompt_jsonl,
+    )
     max_model_len = args.max_model_len or max(
         args.prompt_len + 1 + args.warmup_tokens + args.decode_tokens + args.gamma + 32,
         args.prompt_len + 64,
@@ -803,6 +942,8 @@ def main() -> None:
         prompt_len=args.prompt_len,
         decode_tokens=args.decode_tokens,
         warmup_tokens=args.warmup_tokens,
+        warmup_repeats=args.warmup_repeats,
+        prompt_jsonl=args.prompt_jsonl,
         repeats=args.repeats,
         gamma=args.gamma,
         gpu_memory_utilization=args.gpu_memory_utilization,
