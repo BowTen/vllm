@@ -70,10 +70,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.worker.gpu_worker import Worker
 
-from benchmarks.dssd.benchmark_verifier_vs_vllm import (
-    BenchmarkVerifierSchedulerAdapter,
-)
-
 
 @dataclass
 class BenchmarkResult:
@@ -88,6 +84,66 @@ class BenchmarkResult:
     avg_seconds: float
     tokens_per_second: float
     phase_seconds: dict[str, float] | None = None
+
+
+class BenchmarkVerifierSchedulerAdapter:
+    """Verifier scheduler wrapper with explicit request block hashing."""
+
+    def __init__(self, kv_cache_manager, block_hasher) -> None:
+        from vllm.dssd.verifier.scheduler import VerifierSchedulerAdapter
+
+        self._delegate = VerifierSchedulerAdapter(kv_cache_manager=kv_cache_manager)
+        self.kv_cache_manager = kv_cache_manager
+        self._block_hasher = block_hasher
+
+    def allocate_blocks(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> tuple[list[int], ...]:
+        from vllm.v1.request import Request
+
+        request = Request(
+            request_id=req_id,
+            prompt_token_ids=list(prompt_token_ids),
+            sampling_params=sampling_params,
+            pooling_params=None,
+            lora_request=lora_request,
+            block_hasher=self._block_hasher,
+        )
+        blocks = self.kv_cache_manager.allocate_slots(
+            request=request,
+            num_new_tokens=request.num_tokens - request.num_computed_tokens,
+        )
+        if blocks is None:
+            raise RuntimeError("prefill cannot allocate KV blocks for verifier")
+        self._delegate._pending_new_block_ids_to_zero = (  # noqa: SLF001
+            self._delegate._drain_new_block_ids_to_zero(blocks)  # noqa: SLF001
+        )
+        block_ids = blocks.get_block_ids(allow_none=True)
+        return ([],) if block_ids is None else block_ids
+
+    def _make_request(self, session):
+        from vllm.v1.request import Request
+
+        request = Request(
+            request_id=session.req_id,
+            prompt_token_ids=list(session.prompt_token_ids),
+            sampling_params=session.sampling_params,
+            pooling_params=None,
+            lora_request=session.lora_request,
+            block_hasher=self._block_hasher,
+        )
+        finalized_output = session.token_ids[session.prompt_len:]
+        if finalized_output:
+            request.append_output_token_ids(finalized_output)
+        request.num_computed_tokens = session.num_computed_tokens
+        return request
+
+    def __getattr__(self, name: str):
+        return getattr(self._delegate, name)
 
 
 def build_parser() -> argparse.ArgumentParser:
