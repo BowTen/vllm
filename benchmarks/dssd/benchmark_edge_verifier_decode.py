@@ -36,8 +36,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib import request as urllib_request
 
 from vllm.dssd.transport import FakeNetwork
+from vllm.dssd.transport.fake_network import LinkTimingModel
+
+
+_CALIBRATION_PAYLOAD_BYTES = (1, 65536, 1048576)
+_CALIBRATION_REPEATS = 5
 
 
 @dataclass
@@ -67,6 +73,7 @@ class BenchmarkConfig:
     request_bandwidth_bytes_per_s: float | None = None
     response_latency_ms: float = 0.0
     response_bandwidth_bytes_per_s: float | None = None
+    network_calibration: dict[str, Any] | None = None
 
 
 @dataclass
@@ -291,15 +298,167 @@ def _resolved_max_num_batched_tokens(args: argparse.Namespace) -> int:
 
 def _build_network(
     *,
+    direction: str,
     latency_ms: float,
     bandwidth_bytes_per_s: float | None,
+    local_link_model: LinkTimingModel | None = None,
 ) -> FakeNetwork | None:
     if latency_ms <= 0.0 and bandwidth_bytes_per_s is None:
         return None
     return FakeNetwork(
         fixed_latency_ms=latency_ms,
         bandwidth_bytes_per_s=bandwidth_bytes_per_s,
+        local_link_model=local_link_model,
+        warning_label=direction,
     )
+
+
+def _fit_link_timing_model(
+    payload_bytes: list[int],
+    elapsed_s: list[float],
+) -> LinkTimingModel:
+    if len(payload_bytes) != len(elapsed_s):
+        raise ValueError("payload_bytes and elapsed_s must have the same length")
+    if len(payload_bytes) < 2:
+        raise ValueError("at least two samples are required for link fitting")
+
+    x_values = [float(value) for value in payload_bytes]
+    y_values = [float(value) for value in elapsed_s]
+    x_mean = statistics.mean(x_values)
+    y_mean = statistics.mean(y_values)
+    numerator = sum(
+        (x_value - x_mean) * (y_value - y_mean)
+        for x_value, y_value in zip(x_values, y_values, strict=True)
+    )
+    denominator = sum((x_value - x_mean) ** 2 for x_value in x_values)
+    slope = numerator / denominator if denominator > 0.0 else 0.0
+    intercept = y_mean - slope * x_mean
+    bandwidth = None if slope <= 0.0 else 1.0 / slope
+    return LinkTimingModel(
+        fixed_latency_ms=max(intercept, 0.0) * 1000.0,
+        bandwidth_bytes_per_s=bandwidth,
+    )
+
+
+def _measure_calibration_roundtrip_s(
+    *,
+    server_url: str,
+    request_bytes: int,
+    response_bytes: int,
+) -> float:
+    opener = urllib_request.build_opener(urllib_request.ProxyHandler({}))
+    request_body = b"0" * request_bytes
+    http_request = urllib_request.Request(
+        url=f"{server_url}/calibrate?response_bytes={response_bytes}",
+        data=request_body,
+        headers={"Content-Type": "application/octet-stream"},
+        method="POST",
+    )
+    t0 = time.perf_counter()
+    with opener.open(http_request, timeout=30.0) as response:
+        response_body = response.read()
+    elapsed_s = time.perf_counter() - t0
+    if len(response_body) != response_bytes:
+        raise AssertionError(
+            "calibration response size mismatch: "
+            f"expected {response_bytes}, got {len(response_body)}"
+        )
+    return elapsed_s
+
+
+def _calibrate_direction(
+    *,
+    server_url: str,
+    direction: str,
+) -> dict[str, Any]:
+    sample_times_s: list[float] = []
+    for payload_bytes in _CALIBRATION_PAYLOAD_BYTES:
+        if direction == "request":
+            _measure_calibration_roundtrip_s(
+                server_url=server_url,
+                request_bytes=payload_bytes,
+                response_bytes=1,
+            )
+        elif direction == "response":
+            _measure_calibration_roundtrip_s(
+                server_url=server_url,
+                request_bytes=1,
+                response_bytes=payload_bytes,
+            )
+        timings = []
+        for _ in range(_CALIBRATION_REPEATS):
+            if direction == "request":
+                timings.append(
+                    _measure_calibration_roundtrip_s(
+                        server_url=server_url,
+                        request_bytes=payload_bytes,
+                        response_bytes=1,
+                    )
+                )
+            elif direction == "response":
+                timings.append(
+                    _measure_calibration_roundtrip_s(
+                        server_url=server_url,
+                        request_bytes=1,
+                        response_bytes=payload_bytes,
+                    )
+                )
+            else:
+                raise ValueError(f"unknown direction: {direction}")
+        sample_times_s.append(statistics.median(timings))
+
+    local_link_model = _fit_link_timing_model(
+        payload_bytes=list(_CALIBRATION_PAYLOAD_BYTES),
+        elapsed_s=sample_times_s,
+    )
+    return {
+        "sample_payload_bytes": list(_CALIBRATION_PAYLOAD_BYTES),
+        "sample_elapsed_ms": [value * 1000.0 for value in sample_times_s],
+        "local_fixed_latency_ms": local_link_model.fixed_latency_ms,
+        "local_bandwidth_bytes_per_s": local_link_model.bandwidth_bytes_per_s,
+        "local_link_model": local_link_model,
+    }
+
+
+def _calibrate_http_networks(
+    config: BenchmarkConfig,
+    server_url: str,
+) -> tuple[FakeNetwork | None, FakeNetwork | None, dict[str, Any] | None]:
+    calibration: dict[str, Any] = {}
+
+    request_network = None
+    if config.request_latency_ms > 0.0 or config.request_bandwidth_bytes_per_s is not None:
+        request_info = _calibrate_direction(
+            server_url=server_url,
+            direction="request",
+        )
+        calibration["request"] = {
+            key: value for key, value in request_info.items() if key != "local_link_model"
+        }
+        request_network = _build_network(
+            direction="request",
+            latency_ms=config.request_latency_ms,
+            bandwidth_bytes_per_s=config.request_bandwidth_bytes_per_s,
+            local_link_model=request_info["local_link_model"],
+        )
+
+    response_network = None
+    if config.response_latency_ms > 0.0 or config.response_bandwidth_bytes_per_s is not None:
+        response_info = _calibrate_direction(
+            server_url=server_url,
+            direction="response",
+        )
+        calibration["response"] = {
+            key: value for key, value in response_info.items() if key != "local_link_model"
+        }
+        response_network = _build_network(
+            direction="response",
+            latency_ms=config.response_latency_ms,
+            bandwidth_bytes_per_s=config.response_bandwidth_bytes_per_s,
+            local_link_model=response_info["local_link_model"],
+        )
+
+    return request_network, response_network, calibration or None
 
 
 def _make_sampling_params(max_tokens: int):
@@ -418,6 +577,13 @@ def _stop_process(proc: subprocess.Popen[str]) -> None:
 def _build_edge_service(config: BenchmarkConfig, server_url: str):
     from vllm.dssd.entrypoints import runtime_factory
 
+    (
+        request_network,
+        response_network,
+        calibration,
+    ) = _calibrate_http_networks(config, server_url)
+    config.network_calibration = calibration
+
     runtime_args = SimpleNamespace(
         model=config.edge_model,
         model_runner_version=config.edge_model_runner,
@@ -431,14 +597,8 @@ def _build_edge_service(config: BenchmarkConfig, server_url: str):
         kv_cache_memory_bytes=config.kv_cache_memory_bytes,
         max_num_batched_tokens=config.max_num_batched_tokens,
         max_num_seqs=config.max_num_seqs,
-        request_network=_build_network(
-            latency_ms=config.request_latency_ms,
-            bandwidth_bytes_per_s=config.request_bandwidth_bytes_per_s,
-        ),
-        response_network=_build_network(
-            latency_ms=config.response_latency_ms,
-            bandwidth_bytes_per_s=config.response_bandwidth_bytes_per_s,
-        ),
+        request_network=request_network,
+        response_network=response_network,
     )
     return runtime_factory.build_real_edge_service(runtime_args)
 
@@ -628,6 +788,7 @@ def main() -> None:
     if args.json:
         payload: dict[str, Any] = {
             "config": asdict(config),
+            "network_calibration": config.network_calibration,
             "dssd": {
                 "repeats": [asdict(result) for result in results],
                 "summary": _summarize(results),

@@ -204,3 +204,62 @@ def test_http_verifier_transport_surfaces_unreachable_server_errors() -> None:
             prompt_token_ids=[1, 2, 3],
             sampling_params=SamplingParams(max_tokens=8),
         )
+
+
+def test_http_verifier_transport_uses_serialized_body_sizes_for_network_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.dssd.transport.http_verifier_transport import HTTPVerifierTransport
+
+    class RecordingNetwork:
+        def __init__(self) -> None:
+            self.payload_bytes: list[int] = []
+
+        def simulate_transfer_bytes(self, payload_bytes: int) -> None:
+            self.payload_bytes.append(payload_bytes)
+
+    class FakeHTTPResponse:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._body
+
+    raw_response = (
+        b'{"req_id":"req-1","accepted_len":1,"bonus_token_id":23,'
+        b'"rejected_target_logits":null}'
+    )
+    captured = {}
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["request_bytes"] = bytes(request.data)
+            return FakeHTTPResponse(raw_response)
+
+    request_network = RecordingNetwork()
+    response_network = RecordingNetwork()
+    transport = HTTPVerifierTransport(
+        server_url="http://127.0.0.1:18021",
+        request_network=request_network,
+        response_network=response_network,
+    )
+    monkeypatch.setattr(transport, "_opener", FakeOpener())
+
+    response = transport.verify_round(
+        VerifyRoundRequest(
+            req_id="req-1",
+            committed_token_id=17,
+            draft_token_ids=[19, 20],
+            draft_q_values=[0.6, 0.4],
+        )
+    )
+
+    assert response.accepted_len == 1
+    assert request_network.payload_bytes == [len(captured["request_bytes"])]
+    assert response_network.payload_bytes == [len(raw_response)]

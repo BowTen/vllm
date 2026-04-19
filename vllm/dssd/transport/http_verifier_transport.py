@@ -55,15 +55,11 @@ class HTTPVerifierTransport:
             sampling_params=sampling_params,
             lora_request=lora_request,
         )
-        if self.request_network is not None:
-            self.request_network.simulate_transfer(request)
         payload = self._post(
             path="/open_session",
             payload=open_session_request_to_payload(request),
         )
         response = open_session_response_from_payload(payload)
-        if self.response_network is not None:
-            self.response_network.simulate_transfer(response)
         return response
 
     def verify_round(self, request):
@@ -75,42 +71,46 @@ class HTTPVerifierTransport:
                 draft_token_ids=list(request.draft_token_ids),
                 draft_q_values=list(request.draft_q_values),
             )
-        if self.request_network is not None:
-            self.request_network.simulate_transfer(request)
         payload = self._post(
             path="/verify_round",
             payload=verify_round_request_to_payload(request),
         )
         response = verify_round_response_from_payload(payload)
-        if self.response_network is not None:
-            self.response_network.simulate_transfer(response)
         return response
 
     def close_session(self, req_id: str):
         remote_req_id = self._remote_req_ids.pop(req_id, req_id)
         request = CloseSessionRequest(req_id=remote_req_id)
-        if self.request_network is not None:
-            self.request_network.simulate_transfer(request)
         payload = self._post(
             path="/close_session",
             payload=close_session_request_to_payload(request),
         )
         response = close_session_ack_from_payload(payload)
-        if self.response_network is not None:
-            self.response_network.simulate_transfer(response)
         return response
 
     def _post(self, *, path: str, payload: dict) -> dict:
+        request_body = dump_json(payload)
+        self._simulate_network(
+            network=self.request_network,
+            payload=payload,
+            payload_bytes=len(request_body),
+        )
         http_request = urllib_request.Request(
             url=f"{self.server_url}{path}",
-            data=dump_json(payload),
+            data=request_body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         try:
             with self._opener.open(http_request,
                                    timeout=self.timeout_s) as response:
-                return load_json(response.read())
+                response_body = response.read()
+                self._simulate_network(
+                    network=self.response_network,
+                    payload=response_body,
+                    payload_bytes=len(response_body),
+                )
+                return load_json(response_body)
         except urllib_error.HTTPError as exc:
             error_payload = load_json(exc.read())
             detail = error_payload.get("error", str(exc))
@@ -121,3 +121,12 @@ class HTTPVerifierTransport:
             raise RuntimeError(
                 f"verifier request failed on {path}: {exc.reason}"
             ) from exc
+
+    @staticmethod
+    def _simulate_network(*, network, payload, payload_bytes: int) -> None:
+        if network is None:
+            return
+        if hasattr(network, "simulate_transfer_bytes"):
+            network.simulate_transfer_bytes(payload_bytes)
+            return
+        network.simulate_transfer(payload)

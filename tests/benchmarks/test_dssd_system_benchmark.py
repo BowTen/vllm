@@ -273,6 +273,110 @@ def test_build_edge_service_passes_model_runner_version(monkeypatch) -> None:
     assert captured["args"].gamma == 1
 
 
+def test_fit_link_timing_model_recovers_linear_parameters() -> None:
+    module = _load_module()
+
+    model = module._fit_link_timing_model(
+        payload_bytes=[1, 101, 201],
+        elapsed_s=[0.011, 0.111, 0.211],
+    )
+
+    assert model.fixed_latency_ms == pytest.approx(10.0)
+    assert model.bandwidth_bytes_per_s == pytest.approx(1000.0)
+
+
+def test_build_network_can_include_local_link_model() -> None:
+    module = _load_module()
+    from vllm.dssd.transport.fake_network import LinkTimingModel
+
+    local_model = LinkTimingModel(
+        fixed_latency_ms=3.0,
+        bandwidth_bytes_per_s=4000.0,
+    )
+    network = module._build_network(
+        direction="request",
+        latency_ms=5.0,
+        bandwidth_bytes_per_s=2000.0,
+        local_link_model=local_model,
+    )
+
+    assert network is not None
+    assert network.fixed_latency_ms == 5.0
+    assert network.bandwidth_bytes_per_s == 2000.0
+    assert network.local_link_model == local_model
+    assert network.warning_label == "request"
+
+
+def test_calibrate_http_networks_fits_request_and_response_models(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+
+    monkeypatch.setattr(module, "_CALIBRATION_PAYLOAD_BYTES", (2, 102, 202))
+    monkeypatch.setattr(module, "_CALIBRATION_REPEATS", 1)
+
+    def fake_measure(*, server_url, request_bytes, response_bytes):
+        if request_bytes == 1:
+            return 0.02 + response_bytes / 2000.0
+        if response_bytes == 1:
+            return 0.01 + request_bytes / 1000.0
+        raise AssertionError("unexpected calibration shape")
+
+    monkeypatch.setattr(
+        module,
+        "_measure_calibration_roundtrip_s",
+        fake_measure,
+    )
+
+    config = module.BenchmarkConfig(
+        model="/tmp/model",
+        edge_model="/tmp/model",
+        verifier_model="/tmp/model",
+        edge_model_runner="v1",
+        verifier_model_runner="v2",
+        edge_cuda_visible_devices="0",
+        verifier_cuda_visible_devices="0",
+        verifier_host="127.0.0.1",
+        verifier_port=18021,
+        prompt_len=18,
+        decode_tokens=8,
+        warmup_tokens=0,
+        repeats=1,
+        gamma=1,
+        gpu_memory_utilization=0.01,
+        max_model_len=64,
+        kv_cache_memory_bytes=1024,
+        max_num_batched_tokens=16,
+        max_num_seqs=2,
+        enforce_eager=True,
+        async_scheduling=False,
+        request_latency_ms=40.0,
+        request_bandwidth_bytes_per_s=500.0,
+        response_latency_ms=60.0,
+        response_bandwidth_bytes_per_s=800.0,
+    )
+
+    request_network, response_network, calibration = module._calibrate_http_networks(
+        config,
+        "http://127.0.0.1:18021",
+    )
+
+    assert request_network is not None
+    assert request_network.local_link_model.fixed_latency_ms == pytest.approx(10.0)
+    assert (
+        request_network.local_link_model.bandwidth_bytes_per_s
+        == pytest.approx(1000.0)
+    )
+    assert response_network is not None
+    assert response_network.local_link_model.fixed_latency_ms == pytest.approx(20.0)
+    assert (
+        response_network.local_link_model.bandwidth_bytes_per_s
+        == pytest.approx(2000.0)
+    )
+    assert calibration["request"]["sample_payload_bytes"] == [2, 102, 202]
+    assert calibration["response"]["sample_payload_bytes"] == [2, 102, 202]
+
+
 def test_build_edge_service_injects_network_simulation(monkeypatch) -> None:
     module = _load_module()
     captured = {}
@@ -289,6 +393,18 @@ def test_build_edge_service_injects_network_simulation(monkeypatch) -> None:
         runtime_factory,
         "build_real_edge_service",
         fake_build_real_edge_service,
+    )
+    monkeypatch.setattr(
+        module,
+        "_calibrate_http_networks",
+        lambda config, server_url: (
+            "request-network",
+            "response-network",
+            {
+                "request": {"local_fixed_latency_ms": 1.0},
+                "response": {"local_fixed_latency_ms": 2.0},
+            },
+        ),
     )
 
     config = module.BenchmarkConfig(
@@ -326,12 +442,12 @@ def test_build_edge_service_injects_network_simulation(monkeypatch) -> None:
 
     assert service is sentinel_service
     assert cleanup is sentinel_cleanup
-    assert captured["args"].request_network is not None
-    assert captured["args"].request_network.fixed_latency_ms == 1.5
-    assert captured["args"].request_network.bandwidth_bytes_per_s == 1000.0
-    assert captured["args"].response_network is not None
-    assert captured["args"].response_network.fixed_latency_ms == 2.5
-    assert captured["args"].response_network.bandwidth_bytes_per_s is None
+    assert captured["args"].request_network == "request-network"
+    assert captured["args"].response_network == "response-network"
+    assert config.network_calibration == {
+        "request": {"local_fixed_latency_ms": 1.0},
+        "response": {"local_fixed_latency_ms": 2.0},
+    }
 
 
 def test_dssd_system_benchmark_resolves_max_num_batched_tokens_from_prompt_len(

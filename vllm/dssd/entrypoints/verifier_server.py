@@ -6,6 +6,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -82,6 +83,11 @@ def _build_server(*, host: str, port: int, verifier_service) -> ThreadingHTTPSer
     class VerifierHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             try:
+                if self.path.startswith("/calibrate"):
+                    self.rfile.read(_content_length(self))
+                    response_bytes = _parse_calibration_response_bytes(self.path)
+                    self._send_raw(b"0" * response_bytes)
+                    return
                 payload = load_json(self.rfile.read(_content_length(self)))
                 if self.path == "/open_session":
                     request = open_session_request_from_payload(payload)
@@ -113,8 +119,17 @@ def _build_server(*, host: str, port: int, verifier_service) -> ThreadingHTTPSer
 
         def _send_json(self, payload: dict, *, status: int = 200) -> None:
             body = dump_json(payload)
+            self._send_raw(body, status=status, content_type="application/json")
+
+        def _send_raw(
+            self,
+            body: bytes,
+            *,
+            status: int = 200,
+            content_type: str = "application/octet-stream",
+        ) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -124,6 +139,15 @@ def _build_server(*, host: str, port: int, verifier_service) -> ThreadingHTTPSer
 
 def _content_length(handler: BaseHTTPRequestHandler) -> int:
     return int(handler.headers.get("Content-Length", "0"))
+
+
+def _parse_calibration_response_bytes(path: str) -> int:
+    query = parse_qs(urlparse(path).query)
+    values = query.get("response_bytes", ["1"])
+    response_bytes = int(values[0])
+    if response_bytes < 0:
+        raise ValueError("response_bytes must be non-negative")
+    return response_bytes
 
 
 def _normalize_service_factory_result(result):
