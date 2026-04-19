@@ -56,7 +56,7 @@ class BenchmarkConfig:
     gamma: int
     gpu_memory_utilization: float
     max_model_len: int
-    kv_cache_memory_bytes: int
+    kv_cache_memory_bytes: int | None
     max_num_batched_tokens: int
     max_num_seqs: int
     enforce_eager: bool
@@ -195,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kv-cache-memory-bytes",
         type=int,
-        default=128 * 1024 * 1024,
+        default=None,
         help="KV cache memory budget passed to vLLM.",
     )
     parser.add_argument(
@@ -293,63 +293,42 @@ def _start_verifier_server(
     env["PYTHONPATH"] = str(repo_root)
     env["PYTHONUNBUFFERED"] = "1"
     env["CUDA_VISIBLE_DEVICES"] = config.verifier_cuda_visible_devices
+    base_cmd = [
+        sys.executable,
+        "-m",
+        "vllm.dssd.entrypoints.verifier_server",
+        "--host",
+        config.verifier_host,
+        "--port",
+        str(config.verifier_port),
+        "--ready-file",
+        str(ready_file),
+        "--model",
+        config.verifier_model,
+        "--model-runner-version",
+        config.verifier_model_runner,
+        "--gamma",
+        str(config.gamma),
+        "--max-model-len",
+        str(config.max_model_len),
+        "--gpu-memory-utilization",
+        str(config.gpu_memory_utilization),
+        "--max-num-batched-tokens",
+        str(config.max_num_batched_tokens),
+        "--max-num-seqs",
+        str(config.max_num_seqs),
+    ]
+    if config.kv_cache_memory_bytes is not None:
+        base_cmd.extend(
+            [
+                "--kv-cache-memory-bytes",
+                str(config.kv_cache_memory_bytes),
+            ]
+        )
+    if config.async_scheduling:
+        base_cmd.append("--async-scheduling")
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "vllm.dssd.entrypoints.verifier_server",
-            "--host",
-            config.verifier_host,
-            "--port",
-            str(config.verifier_port),
-            "--ready-file",
-            str(ready_file),
-            "--model",
-            config.verifier_model,
-            "--model-runner-version",
-            config.verifier_model_runner,
-            "--gamma",
-            str(config.gamma),
-            "--max-model-len",
-            str(config.max_model_len),
-            "--gpu-memory-utilization",
-            str(config.gpu_memory_utilization),
-            "--kv-cache-memory-bytes",
-            str(config.kv_cache_memory_bytes),
-            "--max-num-batched-tokens",
-            str(config.max_num_batched_tokens),
-            "--max-num-seqs",
-            str(config.max_num_seqs),
-            "--async-scheduling",
-        ]
-        if config.async_scheduling
-        else [
-            sys.executable,
-            "-m",
-            "vllm.dssd.entrypoints.verifier_server",
-            "--host",
-            config.verifier_host,
-            "--port",
-            str(config.verifier_port),
-            "--ready-file",
-            str(ready_file),
-            "--model",
-            config.verifier_model,
-            "--model-runner-version",
-            config.verifier_model_runner,
-            "--gamma",
-            str(config.gamma),
-            "--max-model-len",
-            str(config.max_model_len),
-            "--gpu-memory-utilization",
-            str(config.gpu_memory_utilization),
-            "--kv-cache-memory-bytes",
-            str(config.kv_cache_memory_bytes),
-            "--max-num-batched-tokens",
-            str(config.max_num_batched_tokens),
-            "--max-num-seqs",
-            str(config.max_num_seqs),
-        ],
+        base_cmd,
         cwd=repo_root,
         env=env,
         stdout=subprocess.PIPE,

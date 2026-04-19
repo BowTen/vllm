@@ -20,6 +20,7 @@ def test_verifier_server_parser_defaults_to_real_service_factory() -> None:
     )
     assert args.model_runner_version == "v1"
     assert args.gamma == 0
+    assert args.kv_cache_memory_bytes is None
 
 
 def test_verifier_server_parser_accepts_model_runner_version() -> None:
@@ -59,6 +60,7 @@ def test_edge_runner_parser_defaults_to_real_service_factory() -> None:
         args.service_factory
         == "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
     )
+    assert args.kv_cache_memory_bytes is None
 
 
 def test_edge_runner_parser_accepts_model_runner_version() -> None:
