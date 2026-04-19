@@ -478,6 +478,50 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
     assert cleanup_calls == ["cleanup"]
 
 
+def test_build_real_edge_service_passes_network_simulation_to_transport(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+    request_network = object()
+    response_network = object()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, lambda: None),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda vllm_config: object(),
+    )
+
+    service, _returned_cleanup = runtime_factory.build_real_edge_service(
+        SimpleNamespace(
+            verifier_url="http://127.0.0.1:9000",
+            eos_token_id=2,
+            gamma=3,
+            model_runner_version="v2",
+            request_network=request_network,
+            response_network=response_network,
+        )
+    )
+
+    assert service.verifier.request_network is request_network
+    assert service.verifier.response_network is response_network
+
+
 def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
     from vllm.dssd.entrypoints import runtime_factory
     from vllm.dssd.service import DSSDEdgeService

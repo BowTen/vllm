@@ -197,7 +197,11 @@ def build_real_edge_service(args):
         return (
             DSSDEdgeService(
                 decode_engine=edge_engine,
-                verifier=HTTPVerifierTransport(server_url=args.verifier_url),
+                verifier=HTTPVerifierTransport(
+                    server_url=args.verifier_url,
+                    request_network=getattr(args, "request_network", None),
+                    response_network=getattr(args, "response_network", None),
+                ),
                 eos_token_id=args.eos_token_id,
                 gamma=args.gamma,
             ),

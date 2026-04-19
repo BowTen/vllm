@@ -9,19 +9,22 @@ class FakeNetwork:
         self,
         *,
         fixed_latency_ms: float,
-        bandwidth_bytes_per_s: float,
+        bandwidth_bytes_per_s: float | None,
     ) -> None:
         if fixed_latency_ms < 0:
             raise ValueError("fixed_latency_ms must be non-negative")
-        if bandwidth_bytes_per_s <= 0:
+        if bandwidth_bytes_per_s is not None and bandwidth_bytes_per_s <= 0:
             raise ValueError("bandwidth_bytes_per_s must be positive")
         self.fixed_latency_ms = float(fixed_latency_ms)
-        self.bandwidth_bytes_per_s = float(bandwidth_bytes_per_s)
+        self.bandwidth_bytes_per_s = (
+            None if bandwidth_bytes_per_s is None else float(bandwidth_bytes_per_s)
+        )
 
     def transfer_time_s(self, payload_bytes: int) -> float:
-        return self.fixed_latency_ms / 1000.0 + (
-            int(payload_bytes) / self.bandwidth_bytes_per_s
-        )
+        transfer_s = self.fixed_latency_ms / 1000.0
+        if self.bandwidth_bytes_per_s is not None:
+            transfer_s += int(payload_bytes) / self.bandwidth_bytes_per_s
+        return transfer_s
 
     def simulate_transfer(self, payload: object) -> None:
         time.sleep(

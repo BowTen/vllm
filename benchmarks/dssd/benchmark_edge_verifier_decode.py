@@ -37,6 +37,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from vllm.dssd.transport import FakeNetwork
+
 
 @dataclass
 class BenchmarkConfig:
@@ -61,6 +63,10 @@ class BenchmarkConfig:
     max_num_seqs: int
     enforce_eager: bool
     async_scheduling: bool
+    request_latency_ms: float = 0.0
+    request_bandwidth_bytes_per_s: float | None = None
+    response_latency_ms: float = 0.0
+    response_bandwidth_bytes_per_s: float | None = None
 
 
 @dataclass
@@ -227,6 +233,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print JSON in addition to the human-readable summary.",
     )
+    parser.add_argument(
+        "--request-latency-ms",
+        type=float,
+        default=0.0,
+        help="Simulated one-way latency added before each edge->verifier request.",
+    )
+    parser.add_argument(
+        "--request-bandwidth-bytes-per-s",
+        type=float,
+        default=None,
+        help="Simulated bandwidth limit for each edge->verifier request payload.",
+    )
+    parser.add_argument(
+        "--response-latency-ms",
+        type=float,
+        default=0.0,
+        help="Simulated one-way latency added after each verifier->edge response.",
+    )
+    parser.add_argument(
+        "--response-bandwidth-bytes-per-s",
+        type=float,
+        default=None,
+        help="Simulated bandwidth limit for each verifier->edge response payload.",
+    )
     return parser
 
 
@@ -257,6 +287,19 @@ def _build_prompt_token_ids(model: str, prompt_len: int) -> list[int]:
 
 def _resolved_max_num_batched_tokens(args: argparse.Namespace) -> int:
     return max(args.max_num_batched_tokens, args.prompt_len)
+
+
+def _build_network(
+    *,
+    latency_ms: float,
+    bandwidth_bytes_per_s: float | None,
+) -> FakeNetwork | None:
+    if latency_ms <= 0.0 and bandwidth_bytes_per_s is None:
+        return None
+    return FakeNetwork(
+        fixed_latency_ms=latency_ms,
+        bandwidth_bytes_per_s=bandwidth_bytes_per_s,
+    )
 
 
 def _make_sampling_params(max_tokens: int):
@@ -388,6 +431,14 @@ def _build_edge_service(config: BenchmarkConfig, server_url: str):
         kv_cache_memory_bytes=config.kv_cache_memory_bytes,
         max_num_batched_tokens=config.max_num_batched_tokens,
         max_num_seqs=config.max_num_seqs,
+        request_network=_build_network(
+            latency_ms=config.request_latency_ms,
+            bandwidth_bytes_per_s=config.request_bandwidth_bytes_per_s,
+        ),
+        response_network=_build_network(
+            latency_ms=config.response_latency_ms,
+            bandwidth_bytes_per_s=config.response_bandwidth_bytes_per_s,
+        ),
     )
     return runtime_factory.build_real_edge_service(runtime_args)
 
@@ -562,6 +613,10 @@ def main() -> None:
         max_num_seqs=args.max_num_seqs,
         enforce_eager=args.enforce_eager,
         async_scheduling=args.async_scheduling,
+        request_latency_ms=args.request_latency_ms,
+        request_bandwidth_bytes_per_s=args.request_bandwidth_bytes_per_s,
+        response_latency_ms=args.response_latency_ms,
+        response_bandwidth_bytes_per_s=args.response_bandwidth_bytes_per_s,
     )
 
     print("Config")

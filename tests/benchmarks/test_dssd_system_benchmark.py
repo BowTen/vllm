@@ -64,6 +64,10 @@ def test_dssd_system_benchmark_parser_defaults_to_mrv1() -> None:
     assert args.edge_model_runner == "v1"
     assert args.verifier_model_runner == "v1"
     assert args.kv_cache_memory_bytes is None
+    assert args.request_latency_ms == 0.0
+    assert args.request_bandwidth_bytes_per_s is None
+    assert args.response_latency_ms == 0.0
+    assert args.response_bandwidth_bytes_per_s is None
 
 
 def test_dssd_system_benchmark_parser_accepts_model_runner_flags() -> None:
@@ -80,6 +84,28 @@ def test_dssd_system_benchmark_parser_accepts_model_runner_flags() -> None:
 
     assert args.edge_model_runner == "v2"
     assert args.verifier_model_runner == "v2"
+
+
+def test_dssd_system_benchmark_parser_accepts_network_simulation_flags() -> None:
+    module = _load_module()
+
+    args = module.build_parser().parse_args(
+        [
+            "--request-latency-ms",
+            "5.5",
+            "--request-bandwidth-bytes-per-s",
+            "12345",
+            "--response-latency-ms",
+            "6.5",
+            "--response-bandwidth-bytes-per-s",
+            "23456",
+        ]
+    )
+
+    assert args.request_latency_ms == 5.5
+    assert args.request_bandwidth_bytes_per_s == 12345.0
+    assert args.response_latency_ms == 6.5
+    assert args.response_bandwidth_bytes_per_s == 23456.0
 
 
 def test_start_verifier_server_passes_model_runner_version_and_gamma(
@@ -245,6 +271,67 @@ def test_build_edge_service_passes_model_runner_version(monkeypatch) -> None:
     assert cleanup is sentinel_cleanup
     assert captured["args"].model_runner_version == "v1"
     assert captured["args"].gamma == 1
+
+
+def test_build_edge_service_injects_network_simulation(monkeypatch) -> None:
+    module = _load_module()
+    captured = {}
+    sentinel_service = object()
+    sentinel_cleanup = object()
+
+    from vllm.dssd.entrypoints import runtime_factory
+
+    def fake_build_real_edge_service(args):
+        captured["args"] = args
+        return sentinel_service, sentinel_cleanup
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "build_real_edge_service",
+        fake_build_real_edge_service,
+    )
+
+    config = module.BenchmarkConfig(
+        model="/tmp/model",
+        edge_model="/tmp/model",
+        verifier_model="/tmp/model",
+        edge_model_runner="v1",
+        verifier_model_runner="v2",
+        edge_cuda_visible_devices="0",
+        verifier_cuda_visible_devices="0",
+        verifier_host="127.0.0.1",
+        verifier_port=18021,
+        prompt_len=18,
+        decode_tokens=8,
+        warmup_tokens=0,
+        repeats=1,
+        gamma=1,
+        gpu_memory_utilization=0.01,
+        max_model_len=64,
+        kv_cache_memory_bytes=1024,
+        max_num_batched_tokens=16,
+        max_num_seqs=2,
+        enforce_eager=True,
+        async_scheduling=False,
+        request_latency_ms=1.5,
+        request_bandwidth_bytes_per_s=1000.0,
+        response_latency_ms=2.5,
+        response_bandwidth_bytes_per_s=None,
+    )
+
+    service, cleanup = module._build_edge_service(
+        config,
+        "http://127.0.0.1:18021",
+    )
+
+    assert service is sentinel_service
+    assert cleanup is sentinel_cleanup
+    assert captured["args"].request_network is not None
+    assert captured["args"].request_network.fixed_latency_ms == 1.5
+    assert captured["args"].request_network.bandwidth_bytes_per_s == 1000.0
+    assert captured["args"].response_network is not None
+    assert captured["args"].response_network.fixed_latency_ms == 2.5
+    assert captured["args"].response_network.bandwidth_bytes_per_s is None
 
 
 def test_dssd_system_benchmark_resolves_max_num_batched_tokens_from_prompt_len(
