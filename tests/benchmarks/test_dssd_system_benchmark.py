@@ -478,6 +478,37 @@ def test_dssd_system_decode_counter_handles_multi_token_rounds() -> None:
     assert counter.is_complete()
 
 
+def test_dssd_system_summary_includes_acceptance_metrics() -> None:
+    module = _load_module()
+
+    summary = module._summarize(
+        [
+            module.RepeatResult(
+                total_s=1.0,
+                tokens_per_s=10.0,
+                per_token_ms=100.0,
+                token_ids=[1, 2],
+                draft_acceptance_rate=0.5,
+                all_accept_round_rate=0.25,
+                avg_accepted_len_per_round=1.5,
+            ),
+            module.RepeatResult(
+                total_s=2.0,
+                tokens_per_s=20.0,
+                per_token_ms=50.0,
+                token_ids=[3, 4],
+                draft_acceptance_rate=0.75,
+                all_accept_round_rate=0.5,
+                avg_accepted_len_per_round=2.5,
+            ),
+        ]
+    )
+
+    assert summary["mean_draft_acceptance_rate"] == pytest.approx(0.625)
+    assert summary["mean_all_accept_round_rate"] == pytest.approx(0.375)
+    assert summary["mean_avg_accepted_len_per_round"] == pytest.approx(2.0)
+
+
 def test_dssd_system_benchmark_stops_verifier_and_skips_edge_cleanup(
     monkeypatch,
     tmp_path,

@@ -82,6 +82,9 @@ class RepeatResult:
     tokens_per_s: float
     per_token_ms: float
     token_ids: list[int]
+    draft_acceptance_rate: float
+    all_accept_round_rate: float
+    avg_accepted_len_per_round: float
 
 
 class DecodeMeasurementCounter:
@@ -636,6 +639,10 @@ def _run_dssd_benchmark(
 
             measured_token_ids: list[int] = []
             measured_total_s = 0.0
+            total_rounds = 0
+            all_accept_rounds = 0
+            total_draft_tokens = 0
+            total_accepted_tokens = 0
             try:
                 while not counter.is_complete():
                     output_len_before = len(session.committed_output_ids())
@@ -657,6 +664,12 @@ def _run_dssd_benchmark(
                             draft_q_values=list(round_state.draft_q_values),
                         )
                     )
+                    draft_len = len(round_state.draft_token_ids)
+                    total_rounds += 1
+                    total_draft_tokens += draft_len
+                    total_accepted_tokens += response.accepted_len
+                    if response.accepted_len == draft_len:
+                        all_accept_rounds += 1
                     next_token, _ = edge_service._commit_verify_result(  # noqa: SLF001
                         session,
                         response,
@@ -678,6 +691,21 @@ def _run_dssd_benchmark(
                         tokens_per_s=config.decode_tokens / measured_total_s,
                         per_token_ms=measured_total_s * 1000.0 / config.decode_tokens,
                         token_ids=measured_token_ids,
+                        draft_acceptance_rate=(
+                            total_accepted_tokens / total_draft_tokens
+                            if total_draft_tokens > 0
+                            else 0.0
+                        ),
+                        all_accept_round_rate=(
+                            all_accept_rounds / total_rounds
+                            if total_rounds > 0
+                            else 0.0
+                        ),
+                        avg_accepted_len_per_round=(
+                            total_accepted_tokens / total_rounds
+                            if total_rounds > 0
+                            else 0.0
+                        ),
                     )
                 )
             finally:
@@ -702,6 +730,9 @@ def _summarize(results: list[RepeatResult]) -> dict[str, float]:
     throughputs = [result.tokens_per_s for result in results]
     latencies = [result.per_token_ms for result in results]
     totals = [result.total_s for result in results]
+    draft_acceptance_rates = [result.draft_acceptance_rate for result in results]
+    all_accept_round_rates = [result.all_accept_round_rate for result in results]
+    avg_accepted_lens = [result.avg_accepted_len_per_round for result in results]
     return {
         "mean_tokens_per_s": statistics.mean(throughputs),
         "stdev_tokens_per_s": statistics.stdev(throughputs)
@@ -712,6 +743,9 @@ def _summarize(results: list[RepeatResult]) -> dict[str, float]:
         if len(latencies) > 1
         else 0.0,
         "mean_total_s": statistics.mean(totals),
+        "mean_draft_acceptance_rate": statistics.mean(draft_acceptance_rates),
+        "mean_all_accept_round_rate": statistics.mean(all_accept_round_rates),
+        "mean_avg_accepted_len_per_round": statistics.mean(avg_accepted_lens),
     }
 
 
@@ -723,13 +757,18 @@ def _print_results(label: str, results: list[RepeatResult]) -> None:
             f"repeat={idx} "
             f"tokens/s={result.tokens_per_s:.2f} "
             f"per_token_ms={result.per_token_ms:.3f} "
-            f"total_s={result.total_s:.4f}"
+            f"total_s={result.total_s:.4f} "
+            f"draft_accept={result.draft_acceptance_rate:.3f} "
+            f"all_accept_round={result.all_accept_round_rate:.3f} "
+            f"avg_accepted_len={result.avg_accepted_len_per_round:.3f}"
         )
     print(
         "summary "
         f"mean_tokens/s={summary['mean_tokens_per_s']:.2f} "
         f"stdev_tokens/s={summary['stdev_tokens_per_s']:.2f} "
-        f"mean_per_token_ms={summary['mean_per_token_ms']:.3f}"
+        f"mean_per_token_ms={summary['mean_per_token_ms']:.3f} "
+        f"mean_draft_accept={summary['mean_draft_acceptance_rate']:.3f} "
+        f"mean_all_accept_round={summary['mean_all_accept_round_rate']:.3f}"
     )
 
 
