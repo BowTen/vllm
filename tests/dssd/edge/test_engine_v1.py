@@ -134,6 +134,7 @@ class FakeStateBridge:
         self.rollback_calls = []
         self.clear_calls = []
         self.commit_calls = []
+        self.mark_pending_calls = []
 
     def bootstrap_first_token(
         self,
@@ -168,6 +169,10 @@ class FakeStateBridge:
         self.inject_calls.append((session, token_id, model_runner))
         session.append_token(int(token_id), computed_delta=0)
         session.round_state.committed_token_id = int(token_id)
+
+    def mark_pending_token_computed(self, session, model_runner) -> None:
+        self.mark_pending_calls.append((session, model_runner))
+        session.num_computed_tokens = session.total_len
 
     def rollback(self, session, rejected_count: int, model_runner) -> None:
         self.rollback_calls.append((session, rejected_count, model_runner))
@@ -399,6 +404,7 @@ def test_draft_repeats_decode_gamma_times_and_collects_round_state() -> None:
     worker.outputs = [
         ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
         ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0}),
     ]
 
     decode_states = [
@@ -407,6 +413,9 @@ def test_draft_repeats_decode_gamma_times_and_collects_round_state() -> None:
         ),
         make_execute_model_state(
             torch.tensor([[9.0, 10.0, 11.0, 12.0]], dtype=torch.float32)
+        ),
+        make_execute_model_state(
+            torch.tensor([[13.0, 14.0, 15.0, 16.0]], dtype=torch.float32)
         ),
     ]
     original_execute = worker.execute_model
@@ -421,16 +430,22 @@ def test_draft_repeats_decode_gamma_times_and_collects_round_state() -> None:
 
     assert state_bridge.clear_calls[0] is session
     assert round_state is session.round_state
-    assert round_state.committed_token_id == 13
+    assert round_state.committed_token_id == 14
     assert round_state.draft_token_ids == [13, 14]
     assert round_state.draft_q_values == [pytest.approx(0.1), pytest.approx(0.2)]
     assert round_state.draft_logits_buffer is not None
     assert round_state.draft_logits_buffer.shape == (2, model_runner.vocab_size)
     assert state_bridge.prepare_calls[0][1] == 21
     assert state_bridge.prepare_calls[1][1] == 13
+    assert state_bridge.prepare_calls[2][1] == 14
+    assert state_bridge.mark_pending_calls == [(session, model_runner)]
     assert [call[1] for call in state_bridge.commit_calls] == [13, 14]
-    assert worker.execute_calls == [("decode", "req-1", 1), ("decode", "req-1", 2)]
-    assert scheduler.decode_calls == [session, session]
+    assert worker.execute_calls == [
+        ("decode", "req-1", 1),
+        ("decode", "req-1", 2),
+        ("decode", "req-1", 3),
+    ]
+    assert scheduler.decode_calls == [session, session, session]
 
 
 def test_decode_one_requires_execute_state_logits() -> None:

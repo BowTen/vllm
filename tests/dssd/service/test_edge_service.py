@@ -28,6 +28,7 @@ class FakeSession:
     req_id: str
     prompt_len: int
     token_ids: list[int]
+    sampling_params: SamplingParams = field(default_factory=SamplingParams)
     round_state: FakeRoundState = field(default_factory=FakeRoundState)
 
     def committed_output_ids(self) -> list[int]:
@@ -56,6 +57,7 @@ class FakeEdgeDecodeEngine:
             req_id=req_id,
             prompt_len=len(prompt_token_ids),
             token_ids=list(prompt_token_ids),
+            sampling_params=sampling_params,
         )
         self.sessions[req_id] = session
         return session
@@ -245,6 +247,49 @@ def test_edge_service_reject_path_accepts_remote_cpu_logits_with_local_cuda_q(
             [0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             dtype=torch.float32,
             device="cpu",
+        ),
+    )
+
+    token_id = service._resample_rejected_token(session, response)  # noqa: SLF001
+
+    assert token_id == 2
+
+
+def test_edge_service_greedy_reject_path_uses_target_argmax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    def fail_multinomial(*_args, **_kwargs):
+        raise AssertionError("greedy rejection must not resample")
+
+    monkeypatch.setattr(torch, "multinomial", fail_multinomial)
+    service = DSSDEdgeService(
+        decode_engine=FakeEdgeDecodeEngine(),
+        verifier=FakeVerifierTransport(verify_responses=[]),
+        eos_token_id=2,
+        gamma=2,
+    )
+    session = FakeSession(
+        req_id="req-1",
+        prompt_len=2,
+        token_ids=[1, 3, 17, 19, 20],
+        sampling_params=SamplingParams(temperature=0.0),
+        round_state=FakeRoundState(
+            draft_token_ids=[19, 20],
+            draft_q_values=[0.6, 0.4],
+            draft_logits_rows=[
+                torch.zeros(8, dtype=torch.float32),
+                torch.zeros(8, dtype=torch.float32),
+            ],
+        ),
+    )
+    response = VerifyRoundResponse(
+        req_id="req-1",
+        accepted_len=1,
+        rejected_target_logits=torch.tensor(
+            [0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=torch.float32,
         ),
     )
 

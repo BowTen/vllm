@@ -6,6 +6,8 @@ import torch
 
 from .types import VerifierRoundRequest, VerifierRoundResult
 
+_GREEDY_TEMPERATURE_EPS = 1e-5
+
 
 class DSSDVerifierSamplerV1:
     def __init__(self, sampler) -> None:
@@ -62,6 +64,32 @@ class DSSDVerifierSamplerV1:
             device=processed_target_logits.device,
             dtype=torch.int64,
         )
+        if self._is_greedy_request(sampling_metadata):
+            target_argmax = processed_target_logits[:draft_len].argmax(dim=-1)
+            mismatches = torch.nonzero(
+                target_argmax != draft_token_ids,
+                as_tuple=False,
+            ).flatten()
+            if mismatches.numel() > 0:
+                reject_idx = int(mismatches[0].item())
+                return VerifierRoundResult(
+                    req_id=request.req_id,
+                    accepted_len=reject_idx,
+                    rejected_target_logits=processed_target_logits[reject_idx].detach(
+                    ).clone(),
+                )
+
+            bonus_output = self.sampler(
+                logits=logits[spec_decode_metadata.bonus_logits_indices],
+                sampling_metadata=replace(sampling_metadata, max_num_logprobs=None),
+                predict_bonus_token=True,
+            )
+            return VerifierRoundResult(
+                req_id=request.req_id,
+                accepted_len=draft_len,
+                bonus_token_id=int(bonus_output.sampled_token_ids[0, 0].item()),
+            )
+
         q_values = torch.tensor(
             request.draft_q_values,
             device=processed_target_logits.device,
@@ -98,3 +126,12 @@ class DSSDVerifierSamplerV1:
             accepted_len=draft_len,
             bonus_token_id=int(bonus_output.sampled_token_ids[0, 0].item()),
         )
+
+    @staticmethod
+    def _is_greedy_request(sampling_metadata) -> bool:
+        if sampling_metadata.all_greedy:
+            return True
+        temperature = sampling_metadata.temperature
+        if temperature is None:
+            return False
+        return bool(torch.all(temperature < _GREEDY_TEMPERATURE_EPS).item())

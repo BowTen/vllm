@@ -25,6 +25,7 @@ class EdgeStateBridgeV1:
     ) -> None:
         self._ensure_supported_sampling_params(session)
         self._ensure_prompt_computed(session)
+        self._ensure_single_pending_decode_token(session, input_token_id)
         session.round_state.committed_token_id = int(input_token_id)
         self._sync_request_state(session, model_runner)
 
@@ -32,8 +33,15 @@ class EdgeStateBridgeV1:
         self._ensure_supported_sampling_params(session)
         self._ensure_prompt_computed(session)
         output_computed_flags = self._output_computed_flags(session)
-        session.append_token(int(token_id), computed_delta=1)
-        output_computed_flags.append(True)
+        for idx, is_computed in enumerate(output_computed_flags):
+            if not is_computed:
+                output_computed_flags[idx] = True
+                break
+        session.append_token(int(token_id), computed_delta=0)
+        output_computed_flags.append(False)
+        session.num_computed_tokens = session.prompt_len + sum(
+            output_computed_flags
+        )
         self._sync_request_state(session, model_runner)
 
     def inject_external_token(
@@ -47,6 +55,19 @@ class EdgeStateBridgeV1:
         output_computed_flags = self._output_computed_flags(session)
         session.append_token(int(token_id), computed_delta=0)
         output_computed_flags.append(False)
+        self._sync_request_state(session, model_runner)
+
+    def mark_pending_token_computed(self, session, model_runner) -> None:
+        self._ensure_supported_sampling_params(session)
+        self._ensure_prompt_computed(session)
+        output_computed_flags = self._output_computed_flags(session)
+        for idx, is_computed in enumerate(output_computed_flags):
+            if not is_computed:
+                output_computed_flags[idx] = True
+                break
+        session.num_computed_tokens = session.prompt_len + sum(
+            output_computed_flags
+        )
         self._sync_request_state(session, model_runner)
 
     def rollback(self, session, rejected_count: int, model_runner) -> None:
@@ -97,6 +118,25 @@ class EdgeStateBridgeV1:
                                  [False] * (output_len - computed_output_len))
         setattr(session, _OUTPUT_COMPUTED_FLAGS_ATTR, output_computed_flags)
         return output_computed_flags
+
+    def _ensure_single_pending_decode_token(
+        self,
+        session,
+        input_token_id: int,
+    ) -> None:
+        output_computed_flags = self._output_computed_flags(session)
+        pending_indices = [
+            idx for idx, is_computed in enumerate(output_computed_flags)
+            if not is_computed
+        ]
+        if (len(pending_indices) == 1
+                and pending_indices[0] == len(output_computed_flags) - 1
+                and session.token_ids[-1] == int(input_token_id)):
+            return
+
+        raise RuntimeError(
+            "edge v1 decode requires exactly one trailing pending token"
+        )
 
     def _sync_request_state(self, session, model_runner) -> None:
         req_state = model_runner.requests[session.req_id]

@@ -181,6 +181,9 @@ class EdgeDecodeEngineV1:
             session.round_state.append_step(token_id, q_value)
             next_input_token_id = token_id
 
+        if gamma > 0:
+            self._compute_pending_token(session, next_input_token_id)
+
         return session.round_state
 
     def commit_external_token(
@@ -234,6 +237,20 @@ class EdgeDecodeEngineV1:
         )
         self.state_bridge.commit_token(session, token_id, self.model_runner)
         return token_id, q_value
+
+    def _compute_pending_token(
+        self,
+        session: EdgeSession,
+        input_token_id: int,
+    ) -> None:
+        self.state_bridge.prepare_next_decode(
+            session,
+            input_token_id,
+            self.model_runner,
+        )
+        self._execute(self.scheduler.build_decode_step(session))
+        self._clear_execute_model_state()
+        self.state_bridge.mark_pending_token_computed(session, self.model_runner)
 
     def _bootstrap_local_first_token(
         self,

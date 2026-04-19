@@ -36,6 +36,14 @@ def _sampling_metadata() -> SamplingMetadata:
     )
 
 
+def _greedy_sampling_metadata() -> SamplingMetadata:
+    metadata = _sampling_metadata()
+    metadata.temperature = torch.tensor([0.0])
+    metadata.all_greedy = True
+    metadata.all_random = False
+    return metadata
+
+
 class _OldSampler:
     def __init__(self, sampled_token_id: int = 2) -> None:
         self.sampled_token_id = sampled_token_id
@@ -228,3 +236,28 @@ def test_reject_round_returns_processed_target_logits() -> None:
             processed_target_logits[result.accepted_len],
         )
         assert result.bonus_token_id is None
+
+
+def test_greedy_round_accepts_matching_draft_tokens_by_argmax() -> None:
+    old_sampler = _OldSampler(sampled_token_id=2)
+    sampler = DSSDVerifierSamplerV1(old_sampler)
+    logits = torch.tensor(
+        [[4.0, 1.0, 0.0], [0.0, 4.0, 1.0], [0.0, 0.0, 4.0]],
+        dtype=torch.float32,
+    )
+
+    result = sampler.verify_round(
+        logits=logits,
+        spec_decode_metadata=_metadata(torch.device("cpu")),
+        sampling_metadata=_greedy_sampling_metadata(),
+        request=VerifierRoundRequest(
+            req_id="req-1",
+            committed_token_id=7,
+            draft_token_ids=[0, 1],
+            draft_q_values=[100.0, 100.0],
+        ),
+    )
+
+    assert result.accepted_len == 2
+    assert result.bonus_token_id == 2
+    assert result.rejected_target_logits is None

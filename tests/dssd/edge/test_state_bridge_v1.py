@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.dssd.edge.state_bridge_v1 import EdgeStateBridgeV1
@@ -73,9 +74,9 @@ def test_rollback_rewinds_v1_cached_request_and_input_batch() -> None:
 
     req_state = runner.requests["req-1"]
     assert req_state.output_token_ids == [20]
-    assert req_state.num_computed_tokens == 2
+    assert req_state.num_computed_tokens == 3
     assert int(runner.input_batch.num_tokens_no_spec[0]) == 3
-    assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 2
+    assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 3
 
 
 def test_rollback_zero_is_a_true_no_op() -> None:
@@ -129,3 +130,54 @@ def test_rollback_keeps_num_computed_tokens_for_external_tail_token() -> None:
     assert req_state.num_computed_tokens == 3
     assert int(runner.input_batch.num_tokens_no_spec[0]) == 4
     assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 3
+
+
+def test_prepare_next_decode_rejects_multiple_pending_tokens() -> None:
+    bridge = EdgeStateBridgeV1()
+    runner = make_runner()
+    session = make_session()
+
+    bridge.inject_external_token(session, 20, runner)
+    bridge.commit_token(session, 21, runner)
+    bridge.inject_external_token(session, 22, runner)
+
+    with pytest.raises(
+        RuntimeError,
+        match="exactly one trailing pending token",
+    ):
+        bridge.prepare_next_decode(session, 22, runner)
+
+    req_state = runner.requests["req-1"]
+    assert session.token_ids == [10, 11, 20, 21, 22]
+    assert session.total_len == 5
+    assert session.num_computed_tokens == 3
+    assert req_state.output_token_ids == [20, 21, 22]
+    assert req_state.num_computed_tokens == 3
+    assert int(runner.input_batch.num_tokens_no_spec[0]) == 5
+    assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 3
+
+
+def test_sampled_token_after_external_input_stays_pending_until_next_decode() -> None:
+    bridge = EdgeStateBridgeV1()
+    runner = make_runner()
+    session = make_session()
+
+    bridge.inject_external_token(session, 20, runner)
+    bridge.commit_token(session, 21, runner)
+    bridge.commit_token(session, 22, runner)
+    bridge.mark_pending_token_computed(session, runner)
+    bridge.inject_external_token(session, 23, runner)
+    bridge.prepare_next_decode(session, 23, runner)
+    bridge.commit_token(session, 24, runner)
+    bridge.prepare_next_decode(session, 24, runner)
+
+    bridge.rollback(session, 1, runner)
+
+    req_state = runner.requests["req-1"]
+    assert session.token_ids == [10, 11, 20, 21, 22, 23]
+    assert session.total_len == 6
+    assert session.num_computed_tokens == 6
+    assert req_state.output_token_ids == [20, 21, 22, 23]
+    assert req_state.num_computed_tokens == 6
+    assert int(runner.input_batch.num_tokens_no_spec[0]) == 6
+    assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 6

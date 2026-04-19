@@ -5,6 +5,8 @@ import torch
 from vllm.dssd.edge.types import EdgeOpenSessionResult
 from vllm.dssd.protocol import VerifyRoundRequest
 
+_GREEDY_TEMPERATURE_EPS = 1e-5
+
 
 class DSSDEdgeService:
     def __init__(
@@ -147,6 +149,9 @@ class DSSDEdgeService:
         if response.rejected_target_logits is None:
             raise RuntimeError("rejected verifier response requires logits")
 
+        if self._is_greedy_session(session):
+            return int(torch.argmax(response.rejected_target_logits).item())
+
         q_logits = session.round_state.q_dist_at(rejected_index)
         p_logits = response.rejected_target_logits.to(
             device=q_logits.device,
@@ -161,6 +166,12 @@ class DSSDEdgeService:
             norm = residual.sum()
         sampled = torch.multinomial(residual / norm, num_samples=1)
         return int(sampled.item())
+
+    @staticmethod
+    def _is_greedy_session(session) -> bool:
+        sampling_params = getattr(session, "sampling_params", None)
+        temperature = getattr(sampling_params, "temperature", None)
+        return temperature is not None and float(temperature) < _GREEDY_TEMPERATURE_EPS
 
     def _has_eos_in_recent_committed_tokens(self, session, committed_count: int) -> bool:
         recent = session.token_ids[-committed_count:]
