@@ -208,6 +208,51 @@ def test_edge_service_generate_reject_path_rolls_back_and_resamples(
     assert verifier.close_calls == ["req-1"]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_edge_service_reject_path_accepts_remote_cpu_logits_with_local_cuda_q(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    monkeypatch.setattr(
+        torch,
+        "multinomial",
+        lambda probs, num_samples: torch.tensor([2], device=probs.device),
+    )
+    service = DSSDEdgeService(
+        decode_engine=FakeEdgeDecodeEngine(),
+        verifier=FakeVerifierTransport(verify_responses=[]),
+        eos_token_id=2,
+        gamma=2,
+    )
+    session = FakeSession(
+        req_id="req-1",
+        prompt_len=2,
+        token_ids=[1, 3, 17, 19, 20],
+        round_state=FakeRoundState(
+            draft_token_ids=[19, 20],
+            draft_q_values=[0.6, 0.4],
+            draft_logits_rows=[
+                torch.zeros(8, dtype=torch.float16, device="cuda"),
+                torch.zeros(8, dtype=torch.float16, device="cuda"),
+            ],
+        ),
+    )
+    response = VerifyRoundResponse(
+        req_id="req-1",
+        accepted_len=1,
+        rejected_target_logits=torch.tensor(
+            [0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dtype=torch.float32,
+            device="cpu",
+        ),
+    )
+
+    token_id = service._resample_rejected_token(session, response)  # noqa: SLF001
+
+    assert token_id == 2
+
+
 def test_edge_service_close_session_closes_both_sides() -> None:
     from vllm.dssd.service.edge_service import DSSDEdgeService
 

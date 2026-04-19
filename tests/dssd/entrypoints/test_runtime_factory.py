@@ -18,7 +18,8 @@ def test_verifier_server_parser_defaults_to_real_service_factory() -> None:
         args.service_factory
         == "vllm.dssd.entrypoints.runtime_factory.build_real_verifier_service"
     )
-    assert args.model_runner_version == "v2"
+    assert args.model_runner_version == "v1"
+    assert args.gamma == 0
 
 
 def test_verifier_server_parser_accepts_model_runner_version() -> None:
@@ -122,7 +123,7 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     )
 
     service, returned_cleanup = runtime_factory.build_real_verifier_service(
-        SimpleNamespace()
+        SimpleNamespace(model_runner_version="v2", gamma=2)
     )
 
     assert isinstance(service, DSSDVerifierService)
@@ -131,6 +132,121 @@ def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     returned_cleanup()
     assert shutdown_calls == ["shutdown"]
     assert cleanup_calls == ["cleanup"]
+
+
+def test_build_real_verifier_service_uses_requested_gamma_for_v2(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+                num_speculative_steps=0,
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, lambda: None),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda _config: None,
+    )
+
+    class FakeVerifierStateBridge:
+        pass
+
+    class FakeDSSDVerifierSampler:
+        def __init__(self, sampler, num_speculative_steps) -> None:
+            captured["sampler"] = sampler
+            captured["num_speculative_steps"] = num_speculative_steps
+
+    class FakeVerifierDecodeEngine:
+        def __init__(self, **kwargs) -> None:
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierStateBridge",
+        FakeVerifierStateBridge,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "DSSDVerifierSampler",
+        FakeDSSDVerifierSampler,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "VerifierDecodeEngine",
+        FakeVerifierDecodeEngine,
+        raising=False,
+    )
+
+    service, _cleanup = runtime_factory.build_real_verifier_service(
+        SimpleNamespace(model_runner_version="v2", gamma=3)
+    )
+
+    assert service.decode_engine.__class__ is FakeVerifierDecodeEngine
+    assert captured["num_speculative_steps"] == 3
+
+
+def test_build_real_verifier_service_v1_sets_speculative_config_from_gamma(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+                num_spec_tokens=2,
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+    captured = {}
+
+    def fake_init_real_runtime(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return runtime, lambda: None
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        fake_init_real_runtime,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda _config: None,
+    )
+
+    runtime_factory.build_real_verifier_service(
+        SimpleNamespace(model_runner_version="v1", gamma=2)
+    )
+
+    assert captured["kwargs"]["use_v2_model_runner"] is False
+    assert captured["args"].speculative_config == {
+        "method": "ngram",
+        "num_speculative_tokens": 2,
+        "prompt_lookup_min": 1,
+        "prompt_lookup_max": 1,
+    }
 
 
 def test_build_real_verifier_service_selects_v1_backend(monkeypatch) -> None:
@@ -342,6 +458,7 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
             verifier_url="http://127.0.0.1:9000",
             eos_token_id=2,
             gamma=3,
+            model_runner_version="v2",
         )
     )
 

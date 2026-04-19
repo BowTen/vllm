@@ -38,8 +38,8 @@ def test_local_engine_benchmark_parser_defaults_to_all_and_prompt_len() -> None:
     assert args.engine == "all"
     assert args.prompt_len == 128
     assert args.native_model_runner == "v1"
-    assert args.edge_model_runner == "v2"
-    assert args.verifier_model_runner == "v2"
+    assert args.edge_model_runner == "v1"
+    assert args.verifier_model_runner == "v1"
     assert args.phase_timing is False
     assert args.dump_decode_state == 0
     assert args.output_json is None

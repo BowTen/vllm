@@ -87,18 +87,35 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _make_v1_verifier_speculative_config(gamma: int) -> dict[str, int]:
+    return {
+        "method": "ngram",
+        "num_speculative_tokens": gamma,
+        "prompt_lookup_min": 1,
+        "prompt_lookup_max": 1,
+    }
+
+
 def build_real_verifier_service(args):
-    model_runner_version = getattr(args, "model_runner_version", "v2")
+    model_runner_version = getattr(args, "model_runner_version", "v1")
     if model_runner_version not in {"v1", "v2"}:
         raise ValueError("model_runner_version must be one of {'v1', 'v2'}")
     async_scheduling = getattr(args, "async_scheduling", False)
+    gamma = int(getattr(args, "gamma", 0))
     if model_runner_version == "v1" and async_scheduling:
         raise ValueError(
             "model_runner_version='v1' requires async_scheduling=False"
         )
 
+    init_args = args
+    if model_runner_version == "v1" and gamma > 0:
+        init_args = SimpleNamespace(
+            **vars(args),
+            speculative_config=_make_v1_verifier_speculative_config(gamma),
+        )
+
     runtime, cleanup = _init_real_runtime(
-        args,
+        init_args,
         use_v2_model_runner=(model_runner_version != "v1"),
     )
     try:
@@ -116,9 +133,7 @@ def build_real_verifier_service(args):
             state_bridge = VerifierStateBridge()
             verifier_sampler = DSSDVerifierSampler(
                 sampler=sampler,
-                num_speculative_steps=(
-                    runtime.worker.model_runner.num_speculative_steps
-                ),
+                num_speculative_steps=gamma,
             )
 
         verifier_engine = verifier_engine_cls(
@@ -139,7 +154,7 @@ def build_real_verifier_service(args):
 
 
 def build_real_edge_service(args):
-    model_runner_version = getattr(args, "model_runner_version", "v2")
+    model_runner_version = getattr(args, "model_runner_version", "v1")
     if model_runner_version not in {"v1", "v2"}:
         raise ValueError(
             "model_runner_version must be one of {'v1', 'v2'}"
@@ -214,6 +229,7 @@ def _init_real_runtime(
             kv_cache_memory_bytes=args.kv_cache_memory_bytes,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_seqs=args.max_num_seqs,
+            speculative_config=getattr(args, "speculative_config", None),
             enable_prefix_caching=False,
             disable_log_stats=True,
         )

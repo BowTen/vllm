@@ -148,7 +148,10 @@ class DSSDEdgeService:
             raise RuntimeError("rejected verifier response requires logits")
 
         q_logits = session.round_state.q_dist_at(rejected_index)
-        p_logits = response.rejected_target_logits
+        p_logits = response.rejected_target_logits.to(
+            device=q_logits.device,
+            dtype=q_logits.dtype,
+        )
         q_probs = torch.softmax(q_logits, dim=-1)
         p_probs = torch.softmax(p_logits, dim=-1)
         residual = torch.clamp(p_probs - q_probs, min=0.0)

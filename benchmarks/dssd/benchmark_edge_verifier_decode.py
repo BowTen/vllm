@@ -43,6 +43,8 @@ class BenchmarkConfig:
     model: str
     edge_model: str
     verifier_model: str
+    edge_model_runner: str
+    verifier_model_runner: str
     edge_cuda_visible_devices: str
     verifier_cuda_visible_devices: str
     verifier_host: str
@@ -113,6 +115,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--verifier-model",
         default=None,
         help="Override the verifier model path or HF model name.",
+    )
+    parser.add_argument(
+        "--edge-model-runner",
+        choices=("v1", "v2"),
+        default="v1",
+        help="Model runner used by the edge runtime.",
+    )
+    parser.add_argument(
+        "--verifier-model-runner",
+        choices=("v1", "v2"),
+        default="v1",
+        help="Model runner used by the verifier runtime.",
     )
     parser.add_argument(
         "--edge-cuda-visible-devices",
@@ -241,6 +255,10 @@ def _build_prompt_token_ids(model: str, prompt_len: int) -> list[int]:
     return prompt_token_ids[:prompt_len]
 
 
+def _resolved_max_num_batched_tokens(args: argparse.Namespace) -> int:
+    return max(args.max_num_batched_tokens, args.prompt_len)
+
+
 def _make_sampling_params(max_tokens: int):
     from vllm.sampling_params import SamplingParams
 
@@ -288,6 +306,10 @@ def _start_verifier_server(
             str(ready_file),
             "--model",
             config.verifier_model,
+            "--model-runner-version",
+            config.verifier_model_runner,
+            "--gamma",
+            str(config.gamma),
             "--max-model-len",
             str(config.max_model_len),
             "--gpu-memory-utilization",
@@ -313,6 +335,10 @@ def _start_verifier_server(
             str(ready_file),
             "--model",
             config.verifier_model,
+            "--model-runner-version",
+            config.verifier_model_runner,
+            "--gamma",
+            str(config.gamma),
             "--max-model-len",
             str(config.max_model_len),
             "--gpu-memory-utilization",
@@ -368,18 +394,14 @@ def _stop_process(proc: subprocess.Popen[str]) -> None:
 
 
 def _build_edge_service(config: BenchmarkConfig, server_url: str):
-    from vllm.dssd.edge import (
-        DSSDEdgeDraftSampler,
-        EdgeDecodeEngine,
-        EdgeSchedulerAdapter,
-        EdgeStateBridge,
-    )
     from vllm.dssd.entrypoints import runtime_factory
-    from vllm.dssd.service import DSSDEdgeService
-    from vllm.dssd.transport import HTTPVerifierTransport
 
     runtime_args = SimpleNamespace(
         model=config.edge_model,
+        model_runner_version=config.edge_model_runner,
+        verifier_url=server_url,
+        eos_token_id=-1,
+        gamma=config.gamma,
         enforce_eager=config.enforce_eager,
         async_scheduling=config.async_scheduling,
         max_model_len=config.max_model_len,
@@ -388,29 +410,7 @@ def _build_edge_service(config: BenchmarkConfig, server_url: str):
         max_num_batched_tokens=config.max_num_batched_tokens,
         max_num_seqs=config.max_num_seqs,
     )
-    runtime, _ = runtime_factory._init_real_runtime(runtime_args)  # noqa: SLF001
-    cleanup = runtime_factory._make_standalone_cleanup(runtime.worker)  # noqa: SLF001
-    block_hasher = runtime_factory._make_request_block_hasher(  # noqa: SLF001
-        runtime.vllm_config
-    )
-
-    edge_engine = EdgeDecodeEngine(
-        vllm_config=runtime.vllm_config,
-        worker=runtime.worker,
-        scheduler=EdgeSchedulerAdapter(
-            kv_cache_manager=runtime.kv_cache_manager,
-            request_block_hasher=block_hasher,
-        ),
-        state_bridge=EdgeStateBridge(),
-        draft_sampler=DSSDEdgeDraftSampler(runtime.worker.model_runner.sampler),
-    )
-    service = DSSDEdgeService(
-        decode_engine=edge_engine,
-        verifier=HTTPVerifierTransport(server_url=server_url),
-        eos_token_id=-1,
-        gamma=config.gamma,
-    )
-    return service, cleanup
+    return runtime_factory.build_real_edge_service(runtime_args)
 
 
 def _run_dssd_benchmark(
@@ -496,10 +496,12 @@ def _run_dssd_benchmark(
 
         return results
     finally:
-        if edge_cleanup is not None:
-            edge_cleanup()
         if verifier_proc is not None:
             _stop_process(verifier_proc)
+        # This benchmark exits the process via _hard_exit() immediately after
+        # printing results. Running the real runtime cleanup here can hang in
+        # distributed teardown for V1-based runs, so rely on process exit to
+        # reclaim local edge runtime state instead.
         if ready_dir is not None:
             for path in ready_dir.glob("*"):
                 path.unlink(missing_ok=True)
@@ -546,7 +548,9 @@ def main() -> None:
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.edge_cuda_visible_devices
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = (
+        "1" if args.edge_model_runner == "v2" else "0"
+    )
 
     _require_cuda()
 
@@ -561,6 +565,8 @@ def main() -> None:
         model=args.model,
         edge_model=edge_model,
         verifier_model=verifier_model,
+        edge_model_runner=args.edge_model_runner,
+        verifier_model_runner=args.verifier_model_runner,
         edge_cuda_visible_devices=args.edge_cuda_visible_devices,
         verifier_cuda_visible_devices=args.verifier_cuda_visible_devices,
         verifier_host=args.verifier_host,
@@ -573,7 +579,7 @@ def main() -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=max_model_len,
         kv_cache_memory_bytes=args.kv_cache_memory_bytes,
-        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_num_batched_tokens=_resolved_max_num_batched_tokens(args),
         max_num_seqs=args.max_num_seqs,
         enforce_eager=args.enforce_eager,
         async_scheduling=args.async_scheduling,

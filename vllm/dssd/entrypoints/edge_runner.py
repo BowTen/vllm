@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-runner-version",
         choices=("v1", "v2"),
-        default="v2",
+        default="v1",
     )
     return parser
 

@@ -141,13 +141,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edge-model-runner",
         choices=("v1", "v2"),
-        default="v2",
+        default="v1",
         help="Model runner used by the edge engine benchmark.",
     )
     parser.add_argument(
         "--verifier-model-runner",
         choices=("v1", "v2"),
-        default="v2",
+        default="v1",
         help="Model runner used by the verifier engine benchmark.",
     )
     parser.add_argument(
