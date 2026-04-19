@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 import msgspec
@@ -107,6 +108,51 @@ def verify_round_response_from_payload(
     )
 
 
+def verify_round_response_to_http_payload(
+    response: VerifyRoundResponse,
+) -> tuple[str, bytes]:
+    if response.rejected_target_logits is None:
+        return (
+            "application/json",
+            dump_json(verify_round_response_to_payload(response)),
+        )
+
+    logits = response.rejected_target_logits.detach().to(
+        device="cpu",
+        dtype=torch.float32,
+    ).contiguous()
+    metadata_bytes = dump_json(
+        {
+            "req_id": response.req_id,
+            "accepted_len": response.accepted_len,
+            "bonus_token_id": None,
+            "dtype": "float32",
+            "shape": list(logits.shape),
+        }
+    )
+    return (
+        "application/octet-stream",
+        len(metadata_bytes).to_bytes(4, byteorder="little", signed=False)
+        + metadata_bytes
+        + logits.numpy().tobytes(),
+    )
+
+
+def verify_round_response_from_http_payload(
+    *,
+    content_type: str,
+    payload: bytes,
+) -> VerifyRoundResponse:
+    normalized = content_type.lower()
+    if normalized.startswith("application/json"):
+        return verify_round_response_from_payload(load_json(payload))
+    if not normalized.startswith("application/octet-stream"):
+        raise RuntimeError(
+            f"unsupported verify_round content type: {content_type}"
+        )
+    return _decode_binary_verify_round_response(payload)
+
+
 def close_session_request_to_payload(
     request: CloseSessionRequest,
 ) -> dict[str, Any]:
@@ -144,3 +190,65 @@ def _decode_tensor(payload: Any) -> torch.Tensor | None:
         return None
     return torch.tensor(payload, dtype=torch.float32)
 
+
+def _decode_binary_verify_round_response(payload: bytes) -> VerifyRoundResponse:
+    if len(payload) < 4:
+        raise RuntimeError(
+            "malformed binary verify_round response: missing metadata length"
+        )
+    metadata_len = int.from_bytes(payload[:4], byteorder="little", signed=False)
+    metadata_end = 4 + metadata_len
+    if len(payload) < metadata_end:
+        raise RuntimeError(
+            "malformed binary verify_round response: truncated metadata"
+        )
+    try:
+        metadata = load_json(payload[4:metadata_end])
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"malformed binary verify_round response: invalid metadata ({exc})"
+        ) from exc
+
+    dtype = metadata.get("dtype")
+    if dtype != "float32":
+        raise RuntimeError(
+            f"malformed binary verify_round response: unsupported dtype {dtype!r}"
+        )
+    shape_payload = metadata.get("shape")
+    if not isinstance(shape_payload, list) or not shape_payload:
+        raise RuntimeError(
+            "malformed binary verify_round response: invalid shape"
+        )
+    try:
+        shape = tuple(int(dim) for dim in shape_payload)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "malformed binary verify_round response: invalid shape"
+        ) from exc
+    if any(dim <= 0 for dim in shape):
+        raise RuntimeError(
+            "malformed binary verify_round response: invalid shape"
+        )
+
+    logits_bytes = payload[metadata_end:]
+    expected_bytes = math.prod(shape) * torch.tensor([], dtype=torch.float32).element_size()
+    if len(logits_bytes) != expected_bytes:
+        raise RuntimeError(
+            "malformed binary verify_round response: logits size mismatch"
+        )
+
+    logits = torch.frombuffer(
+        bytearray(logits_bytes),
+        dtype=torch.float32,
+    ).clone().reshape(shape)
+    try:
+        return VerifyRoundResponse(
+            req_id=metadata["req_id"],
+            accepted_len=int(metadata["accepted_len"]),
+            bonus_token_id=metadata.get("bonus_token_id"),
+            rejected_target_logits=logits,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"malformed binary verify_round response: invalid metadata ({exc})"
+        ) from exc

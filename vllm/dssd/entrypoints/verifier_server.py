@@ -19,7 +19,7 @@ from vllm.dssd.transport.http_utils import (
     open_session_request_from_payload,
     open_session_response_to_payload,
     verify_round_request_from_payload,
-    verify_round_response_to_payload,
+    verify_round_response_to_http_payload,
 )
 
 _DEFAULT_SERVICE_FACTORY = (
@@ -97,7 +97,8 @@ def _build_server(*, host: str, port: int, verifier_service) -> ThreadingHTTPSer
                 if self.path == "/verify_round":
                     request = verify_round_request_from_payload(payload)
                     response = verifier_service.verify_round(request)
-                    self._send_json(verify_round_response_to_payload(response))
+                    content_type, body = verify_round_response_to_http_payload(response)
+                    self._send_raw(body, content_type=content_type)
                     return
                 if self.path == "/close_session":
                     request = close_session_request_from_payload(payload)

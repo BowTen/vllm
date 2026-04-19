@@ -55,6 +55,18 @@ class _FailingVerifyVerifierEngine(_FakeVerifierEngine):
         raise RuntimeError("verify failed")
 
 
+class _RejectingVerifyVerifierEngine(_FakeVerifierEngine):
+    def verify_round(self, session, request) -> _FakeVerifyResult:
+        return _FakeVerifyResult(
+            req_id=request.req_id,
+            accepted_len=0,
+            rejected_target_logits=torch.tensor(
+                [0.5, -0.25, 1.25],
+                dtype=torch.float32,
+            ),
+        )
+
+
 @dataclass
 class _FakeRoundState:
     draft_token_ids: list[int] = field(default_factory=list)
@@ -135,6 +147,10 @@ def build_verifier_service(_args):
 
 def build_failing_verify_verifier_service(_args):
     return DSSDVerifierService(decode_engine=_FailingVerifyVerifierEngine())
+
+
+def build_rejecting_verify_verifier_service(_args):
+    return DSSDVerifierService(decode_engine=_RejectingVerifyVerifierEngine())
 
 
 def build_edge_service(args):
