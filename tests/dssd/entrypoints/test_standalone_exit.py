@@ -340,6 +340,8 @@ def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
     assert "DSSD Edge Benchmark" in body
     assert "benchmark_complete" in body
     assert "Draft Acceptance" in body
+    assert "采样温度" in body
+    assert "temperature: temperature" in body
 
 
 def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:

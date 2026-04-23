@@ -245,6 +245,11 @@
             <input id="maxTokens" type="number" min="1" value="128">
           </div>
 
+          <div class="number-group">
+            <label for="temperature">采样温度</label>
+            <input id="temperature" type="number" min="0" step="0.1" value="0.0">
+          </div>
+
           <label class="toggle" for="includePrompt">
             <input id="includePrompt" type="checkbox">
             token/s 计入 prompt token
@@ -313,6 +318,7 @@
   <script>
     const promptEl = document.getElementById("prompt");
     const maxTokensEl = document.getElementById("maxTokens");
+    const temperatureEl = document.getElementById("temperature");
     const includePromptEl = document.getElementById("includePrompt");
     const runButtonEl = document.getElementById("runButton");
     const statusEl = document.getElementById("status");
@@ -375,6 +381,7 @@
     async function runBenchmark() {
       const prompt = promptEl.value;
       const maxTokens = Number.parseInt(maxTokensEl.value, 10);
+      const temperature = Number.parseFloat(temperatureEl.value);
       if (!prompt.trim()) {
         setStatus("请输入文本。", true);
         promptEl.focus();
@@ -383,6 +390,11 @@
       if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
         setStatus("max_tokens 必须是正整数。", true);
         maxTokensEl.focus();
+        return;
+      }
+      if (!Number.isFinite(temperature) || temperature < 0) {
+        setStatus("temperature 必须是非负数。", true);
+        temperatureEl.focus();
         return;
       }
 
@@ -402,7 +414,7 @@
             prompt,
             sampling_params: {
               max_tokens: maxTokens,
-              temperature: 0.0
+              temperature: temperature
             },
             lora_request: null
           })
