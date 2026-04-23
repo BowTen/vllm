@@ -155,6 +155,15 @@ def test_edge_server_parser_accepts_model_runner_version(monkeypatch) -> None:
     assert args.model_runner_version == "v1"
 
 
+def test_edge_server_reuses_shared_runtime_arg_helper() -> None:
+    edge_server = _load_edge_server_module()
+    runtime_args_path = Path(
+        edge_server._add_runtime_args.__code__.co_filename,
+    )
+
+    assert runtime_args_path.name == "runtime_args.py"
+
+
 def test_build_real_verifier_service_wraps_runtime_and_cleanup(
     monkeypatch,
 ) -> None:

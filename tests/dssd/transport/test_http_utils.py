@@ -3,7 +3,56 @@
 
 from __future__ import annotations
 
+import builtins
+import importlib.util
+import sys
+from pathlib import Path
+
 from vllm.sampling_params import SamplingParams
+
+
+def _load_http_utils_module():
+    module_path = (
+        Path(__file__).resolve().parents[3]
+        / "vllm"
+        / "dssd"
+        / "transport"
+        / "http_utils.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_http_utils_module",
+        module_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_http_utils_module_load_is_lazy_for_edge_server_imports(
+    monkeypatch,
+) -> None:
+    blocked_imports = {
+        "msgspec",
+        "torch",
+        "vllm.lora.request",
+        "vllm.sampling_params",
+    }
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in blocked_imports:
+            raise AssertionError(f"unexpected eager import: {name}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    for module_name in blocked_imports:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    module = _load_http_utils_module()
+
+    assert module is not None
 
 
 def test_edge_generate_request_round_trips_sampling_params() -> None:

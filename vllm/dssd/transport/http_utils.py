@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import msgspec
-import torch
+if TYPE_CHECKING:
+    import torch
 
-from vllm.dssd.protocol import (
-    CloseSessionAck,
-    CloseSessionRequest,
-    OpenSessionRequest,
-    OpenSessionResponse,
-    VerifyRoundRequest,
-    VerifyRoundResponse,
-)
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
+    from vllm.dssd.protocol import (
+        CloseSessionAck,
+        CloseSessionRequest,
+        OpenSessionRequest,
+        OpenSessionResponse,
+        VerifyRoundRequest,
+        VerifyRoundResponse,
+    )
+    from vllm.lora.request import LoRARequest
+    from vllm.sampling_params import SamplingParams
 
 
 def dump_json(payload: dict[str, Any]) -> bytes:
@@ -28,6 +28,8 @@ def load_json(payload: bytes) -> dict[str, Any]:
 
 
 def open_session_request_to_payload(request: OpenSessionRequest) -> dict[str, Any]:
+    import msgspec
+
     return {
         "req_id": request.req_id,
         "prompt_token_ids": list(request.prompt_token_ids),
@@ -39,6 +41,11 @@ def open_session_request_to_payload(request: OpenSessionRequest) -> dict[str, An
 
 
 def open_session_request_from_payload(payload: dict[str, Any]) -> OpenSessionRequest:
+    import msgspec
+
+    from vllm.dssd.protocol import OpenSessionRequest
+    from vllm.sampling_params import SamplingParams
+
     return OpenSessionRequest(
         req_id=payload["req_id"],
         prompt_token_ids=list(payload["prompt_token_ids"]),
@@ -57,6 +64,8 @@ def edge_generate_request_to_payload(
     sampling_params: SamplingParams,
     lora_request: LoRARequest | None = None,
 ) -> dict[str, Any]:
+    import msgspec
+
     return {
         "req_id": req_id,
         "prompt_token_ids": list(prompt_token_ids),
@@ -68,6 +77,10 @@ def edge_generate_request_to_payload(
 
 
 def edge_generate_request_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    import msgspec
+
+    from vllm.sampling_params import SamplingParams
+
     return {
         "req_id": payload["req_id"],
         "prompt_token_ids": list(payload["prompt_token_ids"]),
@@ -109,6 +122,8 @@ def open_session_response_to_payload(
 def open_session_response_from_payload(
     payload: dict[str, Any],
 ) -> OpenSessionResponse:
+    from vllm.dssd.protocol import OpenSessionResponse
+
     return OpenSessionResponse(
         req_id=payload["req_id"],
         bootstrap_token_id=payload["bootstrap_token_id"],
@@ -125,6 +140,8 @@ def verify_round_request_to_payload(request: VerifyRoundRequest) -> dict[str, An
 
 
 def verify_round_request_from_payload(payload: dict[str, Any]) -> VerifyRoundRequest:
+    from vllm.dssd.protocol import VerifyRoundRequest
+
     return VerifyRoundRequest(
         req_id=payload["req_id"],
         committed_token_id=payload["committed_token_id"],
@@ -147,6 +164,8 @@ def verify_round_response_to_payload(
 def verify_round_response_from_payload(
     payload: dict[str, Any],
 ) -> VerifyRoundResponse:
+    from vllm.dssd.protocol import VerifyRoundResponse
+
     return VerifyRoundResponse(
         req_id=payload["req_id"],
         accepted_len=payload["accepted_len"],
@@ -163,6 +182,8 @@ def verify_round_response_to_http_payload(
             "application/json",
             dump_json(verify_round_response_to_payload(response)),
         )
+
+    import torch
 
     logits = response.rejected_target_logits.detach().to(
         device="cpu",
@@ -209,6 +230,8 @@ def close_session_request_to_payload(
 def close_session_request_from_payload(
     payload: dict[str, Any],
 ) -> CloseSessionRequest:
+    from vllm.dssd.protocol import CloseSessionRequest
+
     return CloseSessionRequest(req_id=payload["req_id"])
 
 
@@ -217,12 +240,19 @@ def close_session_ack_to_payload(ack: CloseSessionAck) -> dict[str, Any]:
 
 
 def close_session_ack_from_payload(payload: dict[str, Any]) -> CloseSessionAck:
+    from vllm.dssd.protocol import CloseSessionAck
+
     return CloseSessionAck(req_id=payload["req_id"])
 
 
 def _decode_lora_request(payload: Any) -> LoRARequest | None:
     if payload is None:
         return None
+
+    import msgspec
+
+    from vllm.lora.request import LoRARequest
+
     return msgspec.convert(payload, type=LoRARequest)
 
 
@@ -235,10 +265,17 @@ def _encode_tensor(tensor: torch.Tensor | None) -> Any:
 def _decode_tensor(payload: Any) -> torch.Tensor | None:
     if payload is None:
         return None
+
+    import torch
+
     return torch.tensor(payload, dtype=torch.float32)
 
 
 def _decode_binary_verify_round_response(payload: bytes) -> VerifyRoundResponse:
+    import torch
+
+    from vllm.dssd.protocol import VerifyRoundResponse
+
     if len(payload) < 4:
         raise RuntimeError(
             "malformed binary verify_round response: missing metadata length"

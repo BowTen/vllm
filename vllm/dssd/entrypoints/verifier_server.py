@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .runtime_factory import add_runtime_args
+from .runtime_args import add_runtime_args
 from vllm.dssd.transport.http_utils import (
     close_session_ack_to_payload,
     close_session_request_from_payload,

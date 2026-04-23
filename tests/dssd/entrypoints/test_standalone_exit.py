@@ -244,6 +244,20 @@ def test_edge_server_raw_sampling_flag_is_test_scoped(monkeypatch) -> None:
     )
 
 
+def test_edge_server_reuses_http_utils_edge_generate_helper(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+    from vllm.dssd.transport import http_utils
+
+    sentinel = {"req_id": "req-1", "prompt_token_ids": [1]}
+    monkeypatch.setattr(
+        http_utils,
+        "edge_generate_request_from_payload",
+        lambda payload: sentinel,
+    )
+
+    assert edge_server._edge_generate_request_from_payload({}) is sentinel
+
+
 def test_edge_server_generate_handler_round_trip(monkeypatch) -> None:
     edge_server = _load_edge_server_module()
     _install_edge_server_http_shims(edge_server, monkeypatch)

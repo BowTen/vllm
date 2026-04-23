@@ -9,7 +9,7 @@ import traceback
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .runtime_factory import add_runtime_args
+from .runtime_args import add_runtime_args
 
 _DEFAULT_SERVICE_FACTORY = (
     "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
