@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import msgspec
 
 _DEFAULT_SERVICE_FACTORY = (
     "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
 )
+_DEFAULT_MAX_MODEL_LEN = 64
+_DEFAULT_GPU_MEMORY_UTILIZATION = 0.01
+_DEFAULT_KV_CACHE_MEMORY_BYTES = None
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 64
+_DEFAULT_MAX_NUM_SEQS = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -110,39 +120,92 @@ def _content_length(handler: BaseHTTPRequestHandler) -> int:
 
 
 def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
-    from .runtime_factory import add_runtime_args
-
-    add_runtime_args(parser)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--max-model-len", type=int, default=_DEFAULT_MAX_MODEL_LEN)
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=_DEFAULT_GPU_MEMORY_UTILIZATION,
+    )
+    parser.add_argument(
+        "--kv-cache-memory-bytes",
+        type=int,
+        default=_DEFAULT_KV_CACHE_MEMORY_BYTES,
+    )
+    parser.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=_DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    )
+    parser.add_argument("--max-num-seqs", type=int, default=_DEFAULT_MAX_NUM_SEQS)
+    parser.add_argument(
+        "--enforce-eager",
+        dest="enforce_eager",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no-enforce-eager",
+        dest="enforce_eager",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--async-scheduling",
+        action="store_true",
+        default=False,
+    )
 
 
 def _resolve_obj_by_qualname(qualname: str):
-    from vllm.utils.import_utils import resolve_obj_by_qualname
-
-    return resolve_obj_by_qualname(qualname)
+    module_name, obj_name = qualname.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, obj_name)
 
 
 def _dump_json(payload: dict) -> bytes:
-    from vllm.dssd.transport.http_utils import dump_json
-
-    return dump_json(payload)
+    return json.dumps(payload).encode("utf-8")
 
 
 def _load_json(payload: bytes) -> dict:
-    from vllm.dssd.transport.http_utils import load_json
-
-    return load_json(payload)
+    return json.loads(payload.decode("utf-8"))
 
 
 def _edge_generate_request_from_payload(payload: dict) -> dict:
-    from vllm.dssd.transport.http_utils import edge_generate_request_from_payload
+    if os.environ.get("VLLM_DSSD_EDGE_SERVER_RAW_SAMPLING_PARAMS") == "1":
+        sampling_params = SimpleNamespace(**dict(payload["sampling_params"]))
+        return {
+            "req_id": payload["req_id"],
+            "prompt_token_ids": list(payload["prompt_token_ids"]),
+            "sampling_params": sampling_params,
+            "lora_request": payload.get("lora_request"),
+        }
 
-    return edge_generate_request_from_payload(payload)
+    from vllm.sampling_params import SamplingParams
+
+    return {
+        "req_id": payload["req_id"],
+        "prompt_token_ids": list(payload["prompt_token_ids"]),
+        "sampling_params": msgspec.convert(
+            payload["sampling_params"],
+            type=SamplingParams,
+        ),
+        "lora_request": _decode_lora_request(payload.get("lora_request")),
+    }
 
 
 def _edge_generate_response_to_payload(*, req_id: str, output_ids: list[int]) -> dict:
-    from vllm.dssd.transport.http_utils import edge_generate_response_to_payload
+    return {
+        "req_id": req_id,
+        "output_ids": list(output_ids),
+    }
 
-    return edge_generate_response_to_payload(req_id=req_id, output_ids=output_ids)
+
+def _decode_lora_request(payload: Any):
+    if payload is None:
+        return None
+    from vllm.lora.request import LoRARequest
+
+    return msgspec.convert(payload, type=LoRARequest)
 
 
 def _normalize_service_factory_result(result):

@@ -3,12 +3,9 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
-
-import torch
-
-from vllm.dssd.protocol import VerifyRoundResponse
-from vllm.dssd.service import DSSDEdgeService, DSSDVerifierService
 
 
 @dataclass
@@ -57,6 +54,8 @@ class _FailingVerifyVerifierEngine(_FakeVerifierEngine):
 
 class _RejectingVerifyVerifierEngine(_FakeVerifierEngine):
     def verify_round(self, session, request) -> _FakeVerifyResult:
+        import torch
+
         return _FakeVerifyResult(
             req_id=request.req_id,
             accepted_len=0,
@@ -117,6 +116,8 @@ class _FakeEdgeDecodeEngine:
         first_token_id: int,
         gamma: int,
     ) -> _FakeRoundState:
+        import torch
+
         session.round_state = _FakeRoundState(
             draft_token_ids=[19, 20][:gamma],
             draft_q_values=[0.6, 0.4][:gamma],
@@ -141,19 +142,83 @@ class _FakeEdgeDecodeEngine:
         self.sessions.pop(session.req_id, None)
 
 
+class _FakePersistentEdgeService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(
+        self,
+        *,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        self.calls += 1
+        return [17, self.calls]
+
+
+class _BlockingEdgeService:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started_file = os.environ["DSSD_EDGE_STARTED_FILE"]
+        self.release_file = os.environ["DSSD_EDGE_RELEASE_FILE"]
+
+    def generate(
+        self,
+        *,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        self.calls += 1
+        if self.calls == 1:
+            with open(self.started_file, "w", encoding="utf-8") as handle:
+                handle.write("started")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if os.path.exists(self.release_file):
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("timed out waiting for release file")
+            return [9001]
+        return [9002]
+
+
+class _FailingEdgeService:
+    def generate(
+        self,
+        *,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        raise RuntimeError("edge generate failed")
+
+
 def build_verifier_service(_args):
+    from vllm.dssd.service import DSSDVerifierService
+
     return DSSDVerifierService(decode_engine=_FakeVerifierEngine())
 
 
 def build_failing_verify_verifier_service(_args):
+    from vllm.dssd.service import DSSDVerifierService
+
     return DSSDVerifierService(decode_engine=_FailingVerifyVerifierEngine())
 
 
 def build_rejecting_verify_verifier_service(_args):
+    from vllm.dssd.service import DSSDVerifierService
+
     return DSSDVerifierService(decode_engine=_RejectingVerifyVerifierEngine())
 
 
 def build_edge_service(args):
+    from vllm.dssd.service import DSSDEdgeService
     from vllm.dssd.transport.http_verifier_transport import HTTPVerifierTransport
 
     return DSSDEdgeService(
@@ -162,3 +227,15 @@ def build_edge_service(args):
         eos_token_id=args.eos_token_id,
         gamma=args.gamma,
     )
+
+
+def build_persistent_edge_service(_args):
+    return _FakePersistentEdgeService()
+
+
+def build_blocking_edge_service(_args):
+    return _BlockingEdgeService()
+
+
+def build_failing_edge_service(_args):
+    return _FailingEdgeService()
