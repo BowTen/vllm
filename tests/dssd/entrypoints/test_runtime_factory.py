@@ -4,9 +4,30 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def _load_edge_server_module():
+    module_path = (
+        Path(__file__).resolve().parents[3]
+        / "vllm"
+        / "dssd"
+        / "entrypoints"
+        / "edge_server.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_edge_server_module",
+        module_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_verifier_server_parser_defaults_to_real_service_factory() -> None:
@@ -76,6 +97,52 @@ def test_edge_runner_parser_accepts_model_runner_version() -> None:
             "1,2,3",
             "--max-tokens",
             "4",
+            "--eos-token-id",
+            "2",
+            "--gamma",
+            "2",
+            "--model-runner-version",
+            "v1",
+        ]
+    )
+
+    assert args.model_runner_version == "v1"
+
+
+def test_edge_server_parser_defaults_to_real_service_factory(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+
+    monkeypatch.setattr(edge_server, "_add_runtime_args", lambda parser: None)
+
+    args = edge_server.build_parser().parse_args(
+        [
+            "--verifier-url",
+            "http://127.0.0.1:8000",
+            "--eos-token-id",
+            "2",
+            "--gamma",
+            "2",
+        ]
+    )
+
+    assert (
+        args.service_factory
+        == "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
+    )
+    assert args.host == "127.0.0.1"
+    assert args.port == 0
+    assert args.model_runner_version == "v1"
+
+
+def test_edge_server_parser_accepts_model_runner_version(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+
+    monkeypatch.setattr(edge_server, "_add_runtime_args", lambda parser: None)
+
+    args = edge_server.build_parser().parse_args(
+        [
+            "--verifier-url",
+            "http://127.0.0.1:8000",
             "--eos-token-id",
             "2",
             "--gamma",
