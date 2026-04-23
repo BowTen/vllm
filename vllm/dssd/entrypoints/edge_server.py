@@ -100,17 +100,28 @@ def _build_server(*, host: str, port: int, edge_service) -> ThreadingHTTPServer:
     class EdgeHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             try:
-                if self.path != "/generate":
+                if self.path not in {"/generate", "/complete"}:
                     self.send_error(404, "unknown path")
                     return
                 payload = _load_json(self.rfile.read(_content_length(self)))
-                request_kwargs = _edge_generate_request_from_payload(payload)
+                if self.path == "/generate":
+                    request_kwargs = _edge_generate_request_from_payload(payload)
+                    with execution_lock:
+                        output_ids = edge_service.generate(**request_kwargs)
+                    self._send_json(
+                        _edge_generate_response_to_payload(
+                            req_id=request_kwargs["req_id"],
+                            output_ids=list(output_ids),
+                        ))
+                    return
+
+                request_kwargs = _edge_complete_request_from_payload(payload)
                 with execution_lock:
-                    output_ids = edge_service.generate(**request_kwargs)
+                    text = edge_service.complete(**request_kwargs)
                 self._send_json(
-                    _edge_generate_response_to_payload(
+                    _edge_complete_response_to_payload(
                         req_id=request_kwargs["req_id"],
-                        output_ids=list(output_ids),
+                        text=text,
                     ))
             except Exception as exc:
                 self._send_json(
@@ -137,6 +148,8 @@ def _build_server(*, host: str, port: int, edge_service) -> ThreadingHTTPServer:
 
 def _content_length(handler: BaseHTTPRequestHandler) -> int:
     return int(handler.headers.get("Content-Length", "0"))
+
+
 def _resolve_obj_by_qualname(qualname: str):
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -174,6 +187,27 @@ def _edge_generate_response_to_payload(*, req_id: str, output_ids: list[int]) ->
     from vllm.dssd.transport.http_utils import edge_generate_response_to_payload
 
     return edge_generate_response_to_payload(req_id=req_id, output_ids=output_ids)
+
+
+def _edge_complete_request_from_payload(payload: dict) -> dict:
+    if _allow_raw_sampling_params:
+        sampling_params = SimpleNamespace(**dict(payload["sampling_params"]))
+        return {
+            "req_id": payload["req_id"],
+            "prompt": payload["prompt"],
+            "sampling_params": sampling_params,
+            "lora_request": payload.get("lora_request"),
+        }
+
+    from vllm.dssd.transport.http_utils import edge_complete_request_from_payload
+
+    return edge_complete_request_from_payload(payload)
+
+
+def _edge_complete_response_to_payload(*, req_id: str, text: str) -> dict:
+    from vllm.dssd.transport.http_utils import edge_complete_response_to_payload
+
+    return edge_complete_response_to_payload(req_id=req_id, text=text)
 
 
 def _should_decode_raw_sampling_params(service_factory: str) -> bool:

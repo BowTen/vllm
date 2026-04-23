@@ -142,6 +142,19 @@ class FakeVerifierTransport:
         return SimpleNamespace(req_id=req_id, ack=True)
 
 
+class FakeTokenizer:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def __call__(self, prompt: str):
+        self.calls.append(("encode", prompt))
+        return SimpleNamespace(input_ids=[11, 12])
+
+    def decode(self, token_ids: list[int], **kwargs) -> str:
+        self.calls.append(("decode", list(token_ids), kwargs))
+        return " completed text"
+
+
 def test_edge_service_open_session_prefills_with_verifier_bootstrap() -> None:
     from vllm.dssd.service.edge_service import DSSDEdgeService
 
@@ -165,6 +178,43 @@ def test_edge_service_open_session_prefills_with_verifier_bootstrap() -> None:
     assert opened.bootstrap_token_id == 17
     assert len(edge_engine.prefill_calls) == 1
     assert verifier.open_calls == [("req-1", [1, 3, 5], sampling_params)]
+
+
+def test_edge_service_complete_encodes_prompt_and_decodes_generated_ids() -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    tokenizer = FakeTokenizer()
+    edge_engine = FakeEdgeDecodeEngine()
+    verifier = FakeVerifierTransport(
+        verify_responses=[
+            VerifyRoundResponse(
+                req_id="req-1",
+                accepted_len=2,
+                bonus_token_id=21,
+            )
+        ]
+    )
+    service = DSSDEdgeService(
+        decode_engine=edge_engine,
+        verifier=verifier,
+        tokenizer=tokenizer,
+        eos_token_id=2,
+        gamma=2,
+    )
+    sampling_params = SamplingParams(max_tokens=4, temperature=0.0)
+
+    completion = service.complete(
+        req_id="req-1",
+        prompt="hello",
+        sampling_params=sampling_params,
+    )
+
+    assert completion == " completed text"
+    assert edge_engine.open_calls == [("req-1", [11, 12], sampling_params)]
+    assert tokenizer.calls == [
+        ("encode", "hello"),
+        ("decode", [17, 19, 20, 21], {"skip_special_tokens": True}),
+    ]
 
 
 def test_edge_service_generate_reject_path_rolls_back_and_resamples(

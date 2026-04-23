@@ -288,6 +288,37 @@ def test_edge_server_generate_handler_round_trip(monkeypatch) -> None:
     }
 
 
+def test_edge_server_complete_handler_round_trip(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+    server, thread = _start_edge_server(
+        edge_server,
+        edge_service=SimpleNamespace(
+            complete=lambda **kwargs: _assert_complete_kwargs(kwargs)
+            or " completed text"
+        ),
+    )
+
+    try:
+        response = _post_json(
+            server,
+            "/complete",
+            {
+                "req_id": "req-text",
+                "prompt": "hello",
+                "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                "lora_request": None,
+            },
+        )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert response == {
+        "req_id": "req-text",
+        "text": " completed text",
+    }
+
+
 def test_edge_server_generate_handler_returns_structured_500(monkeypatch) -> None:
     edge_server = _load_edge_server_module()
     _install_edge_server_http_shims(edge_server, monkeypatch)
@@ -327,6 +358,16 @@ def _assert_generate_kwargs(kwargs: dict) -> None:
     assert kwargs["req_id"].startswith("req-")
     assert kwargs["sampling_params"] == {
         "max_tokens": kwargs["sampling_params"]["max_tokens"],
+        "temperature": 0.0,
+    }
+    assert kwargs["lora_request"] is None
+
+
+def _assert_complete_kwargs(kwargs: dict) -> None:
+    assert kwargs["req_id"] == "req-text"
+    assert kwargs["prompt"] == "hello"
+    assert kwargs["sampling_params"] == {
+        "max_tokens": 4,
         "temperature": 0.0,
     }
     assert kwargs["lora_request"] is None
@@ -389,5 +430,23 @@ def _install_edge_server_http_shims(edge_server, monkeypatch) -> None:
         lambda *, req_id, output_ids: {
             "req_id": req_id,
             "output_ids": list(output_ids),
+        },
+    )
+    monkeypatch.setattr(
+        edge_server,
+        "_edge_complete_request_from_payload",
+        lambda payload: {
+            "req_id": payload["req_id"],
+            "prompt": payload["prompt"],
+            "sampling_params": dict(payload["sampling_params"]),
+            "lora_request": payload.get("lora_request"),
+        },
+    )
+    monkeypatch.setattr(
+        edge_server,
+        "_edge_complete_response_to_payload",
+        lambda *, req_id, text: {
+            "req_id": req_id,
+            "text": text,
         },
     )

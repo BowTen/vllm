@@ -525,14 +525,21 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
         lambda args, **kwargs: (runtime, fake_cleanup),
     )
     sentinel_block_hasher = object()
+    sentinel_tokenizer = object()
     monkeypatch.setattr(
         runtime_factory,
         "_make_request_block_hasher",
         lambda vllm_config: sentinel_block_hasher,
     )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_get_tokenizer",
+        lambda args, vllm_config: sentinel_tokenizer,
+    )
 
     service, returned_cleanup = runtime_factory.build_real_edge_service(
         SimpleNamespace(
+            model="fake-model",
             verifier_url="http://127.0.0.1:9000",
             eos_token_id=2,
             gamma=3,
@@ -547,6 +554,7 @@ def test_build_real_edge_service_wraps_runtime_transport_and_cleanup(
     assert service.verifier.server_url == "http://127.0.0.1:9000"
     assert isinstance(service.decode_engine.state_bridge, EdgeStateBridge)
     assert isinstance(service.decode_engine.draft_sampler, DSSDEdgeDraftSampler)
+    assert service.tokenizer is sentinel_tokenizer
     assert service.eos_token_id == 2
     assert service.gamma == 3
     returned_cleanup()
@@ -581,6 +589,11 @@ def test_build_real_edge_service_passes_network_simulation_to_transport(
         runtime_factory,
         "_make_request_block_hasher",
         lambda vllm_config: object(),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_get_tokenizer",
+        lambda args, vllm_config: object(),
     )
 
     service, _returned_cleanup = runtime_factory.build_real_edge_service(
@@ -629,6 +642,11 @@ def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
         runtime_factory,
         "_make_request_block_hasher",
         lambda vllm_config: sentinel_block_hasher,
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_get_tokenizer",
+        lambda args, vllm_config: object(),
     )
 
     created = {}

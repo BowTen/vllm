@@ -161,6 +161,7 @@ def build_real_edge_service(args):
                     request_network=getattr(args, "request_network", None),
                     response_network=getattr(args, "response_network", None),
                 ),
+                tokenizer=_get_tokenizer(args, runtime.vllm_config),
                 eos_token_id=args.eos_token_id,
                 gamma=args.gamma,
             ),
@@ -251,6 +252,17 @@ def _init_real_runtime(
         _cleanup_dist_runtime(old_use_v2_model_runner)
 
     return runtime, cleanup
+
+
+def _get_tokenizer(args, vllm_config):
+    from vllm.tokenizers import cached_tokenizer_from_config, get_tokenizer
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is not None:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        if tokenizer is not None:
+            return tokenizer
+    return get_tokenizer(getattr(args, "model", None) or _resolve_default_model())
 
 
 def _cleanup_dist_runtime(old_use_v2_model_runner: str | None) -> None:

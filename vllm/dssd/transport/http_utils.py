@@ -110,6 +110,59 @@ def edge_generate_response_from_payload(payload: dict[str, Any]) -> dict[str, An
     }
 
 
+def edge_complete_request_to_payload(
+    *,
+    req_id: str,
+    prompt: str,
+    sampling_params: SamplingParams,
+    lora_request: LoRARequest | None = None,
+) -> dict[str, Any]:
+    import msgspec
+
+    return {
+        "req_id": req_id,
+        "prompt": prompt,
+        "sampling_params": msgspec.to_builtins(sampling_params),
+        "lora_request": (
+            None if lora_request is None else msgspec.to_builtins(lora_request)
+        ),
+    }
+
+
+def edge_complete_request_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    import msgspec
+
+    from vllm.sampling_params import SamplingParams
+
+    return {
+        "req_id": payload["req_id"],
+        "prompt": payload["prompt"],
+        "sampling_params": msgspec.convert(
+            payload["sampling_params"],
+            type=SamplingParams,
+        ),
+        "lora_request": _decode_lora_request(payload.get("lora_request")),
+    }
+
+
+def edge_complete_response_to_payload(
+    *,
+    req_id: str,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "req_id": req_id,
+        "text": text,
+    }
+
+
+def edge_complete_response_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "req_id": payload["req_id"],
+        "text": payload["text"],
+    }
+
+
 def open_session_response_to_payload(
     response: OpenSessionResponse,
 ) -> dict[str, Any]:

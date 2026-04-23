@@ -94,3 +94,36 @@ def test_edge_generate_response_round_trips_output_ids() -> None:
         "req_id": "req-7",
         "output_ids": [17, 19, 20, 21],
     }
+
+
+def test_edge_complete_request_and_response_round_trip() -> None:
+    from vllm.dssd.transport.http_utils import (
+        edge_complete_request_from_payload,
+        edge_complete_request_to_payload,
+        edge_complete_response_from_payload,
+        edge_complete_response_to_payload,
+    )
+
+    request_payload = edge_complete_request_to_payload(
+        req_id="req-text",
+        prompt="Once upon a time",
+        sampling_params=SamplingParams(max_tokens=8, temperature=0.2),
+        lora_request=None,
+    )
+    request = edge_complete_request_from_payload(request_payload)
+
+    assert request["req_id"] == "req-text"
+    assert request["prompt"] == "Once upon a time"
+    assert request["sampling_params"].max_tokens == 8
+    assert request["sampling_params"].temperature == 0.2
+    assert request["lora_request"] is None
+
+    response_payload = edge_complete_response_to_payload(
+        req_id="req-text",
+        text=" and then",
+    )
+
+    assert edge_complete_response_from_payload(response_payload) == {
+        "req_id": "req-text",
+        "text": " and then",
+    }

@@ -14,11 +14,13 @@ class DSSDEdgeService:
         *,
         decode_engine,
         verifier,
+        tokenizer=None,
         eos_token_id: int,
         gamma: int,
     ) -> None:
         self.decode_engine = decode_engine
         self.verifier = verifier
+        self.tokenizer = tokenizer
         self.eos_token_id = int(eos_token_id)
         self.gamma = int(gamma)
 
@@ -118,6 +120,28 @@ class DSSDEdgeService:
         finally:
             if req_id in self.decode_engine.sessions:
                 self.close_session(req_id)
+
+    def complete(
+        self,
+        *,
+        req_id: str,
+        prompt: str,
+        sampling_params,
+        lora_request=None,
+    ) -> str:
+        if self.tokenizer is None:
+            raise RuntimeError("DSSDEdgeService.complete requires a tokenizer")
+        prompt_token_ids = list(self.tokenizer(prompt).input_ids)
+        output_ids = self.generate(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
+        return self.tokenizer.decode(
+            list(output_ids),
+            skip_special_tokens=True,
+        )
 
     def close_session(self, req_id: str) -> None:
         session = self.decode_engine.sessions[req_id]
