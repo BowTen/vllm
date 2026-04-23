@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from urllib import error, request
@@ -203,6 +205,43 @@ def test_edge_server_main_hard_exits_after_cleanup(monkeypatch,
 
     assert events == ["serve_forever", "server_close", "cleanup"]
     assert ready_file.exists()
+
+
+def test_edge_server_module_loads_without_msgspec_in_raw_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VLLM_DSSD_TEST_EDGE_SERVER_RAW_SAMPLING_PARAMS", "1")
+    monkeypatch.delitem(sys.modules, "msgspec", raising=False)
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "msgspec":
+            raise AssertionError("msgspec import should stay lazy in raw mode")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    edge_server = _load_edge_server_module()
+
+    assert edge_server is not None
+
+
+def test_edge_server_raw_sampling_flag_is_test_scoped(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+
+    monkeypatch.delenv("VLLM_DSSD_TEST_EDGE_SERVER_RAW_SAMPLING_PARAMS",
+                       raising=False)
+    assert not edge_server._should_decode_raw_sampling_params(
+        "tests.entrypoints.dssd_fake_factories.build_persistent_edge_service"
+    )
+
+    monkeypatch.setenv("VLLM_DSSD_TEST_EDGE_SERVER_RAW_SAMPLING_PARAMS", "1")
+    assert edge_server._should_decode_raw_sampling_params(
+        "tests.entrypoints.dssd_fake_factories.build_persistent_edge_service"
+    )
+    assert not edge_server._should_decode_raw_sampling_params(
+        "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
+    )
 
 
 def test_edge_server_generate_handler_round_trip(monkeypatch) -> None:

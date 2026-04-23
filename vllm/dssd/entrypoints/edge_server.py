@@ -11,16 +11,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import msgspec
-
 _DEFAULT_SERVICE_FACTORY = (
     "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
 )
+_RAW_SAMPLING_PARAMS_ENV = "VLLM_DSSD_TEST_EDGE_SERVER_RAW_SAMPLING_PARAMS"
 _DEFAULT_MAX_MODEL_LEN = 64
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.01
 _DEFAULT_KV_CACHE_MEMORY_BYTES = None
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 64
 _DEFAULT_MAX_NUM_SEQS = 2
+_allow_raw_sampling_params = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,7 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global _allow_raw_sampling_params
+
     args = build_parser().parse_args()
+    _allow_raw_sampling_params = _should_decode_raw_sampling_params(
+        args.service_factory)
     service_factory = _resolve_obj_by_qualname(args.service_factory)
     edge_service, cleanup = _normalize_service_factory_result(service_factory(args))
     server = _build_server(
@@ -171,7 +175,7 @@ def _load_json(payload: bytes) -> dict:
 
 
 def _edge_generate_request_from_payload(payload: dict) -> dict:
-    if os.environ.get("VLLM_DSSD_EDGE_SERVER_RAW_SAMPLING_PARAMS") == "1":
+    if _allow_raw_sampling_params:
         sampling_params = SimpleNamespace(**dict(payload["sampling_params"]))
         return {
             "req_id": payload["req_id"],
@@ -181,6 +185,7 @@ def _edge_generate_request_from_payload(payload: dict) -> dict:
         }
 
     from vllm.sampling_params import SamplingParams
+    import msgspec
 
     return {
         "req_id": payload["req_id"],
@@ -203,9 +208,16 @@ def _edge_generate_response_to_payload(*, req_id: str, output_ids: list[int]) ->
 def _decode_lora_request(payload: Any):
     if payload is None:
         return None
+
+    import msgspec
     from vllm.lora.request import LoRARequest
 
     return msgspec.convert(payload, type=LoRARequest)
+
+
+def _should_decode_raw_sampling_params(service_factory: str) -> bool:
+    return (os.environ.get(_RAW_SAMPLING_PARAMS_ENV) == "1"
+            and service_factory.startswith("tests."))
 
 
 def _normalize_service_factory_result(result):

@@ -220,7 +220,7 @@ def _start_edge_server(
     env = os.environ | {
         "PYTHONPATH": str(repo_root),
         "PYTHONUNBUFFERED": "1",
-        "VLLM_DSSD_EDGE_SERVER_RAW_SAMPLING_PARAMS": "1",
+        "VLLM_DSSD_TEST_EDGE_SERVER_RAW_SAMPLING_PARAMS": "1",
     }
     if extra_env:
         env.update(extra_env)
