@@ -130,7 +130,7 @@ def test_edge_server_parser_defaults_to_real_service_factory(monkeypatch) -> Non
         == "vllm.dssd.entrypoints.runtime_factory.build_real_edge_service"
     )
     assert args.host == "127.0.0.1"
-    assert args.port == 0
+    assert args.port == 6006
     assert args.model_runner_version == "v1"
 
 

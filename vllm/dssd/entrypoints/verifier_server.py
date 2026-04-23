@@ -79,7 +79,12 @@ def main() -> int:
     return 0
 
 
-def _build_server(*, host: str, port: int, verifier_service) -> ThreadingHTTPServer:
+def _build_server(
+    *,
+    host: str,
+    port: int,
+    verifier_service,
+) -> ThreadingHTTPServer:
     class VerifierHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             try:

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--service-factory", default=_DEFAULT_SERVICE_FACTORY)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--port", type=int, default=6006)
     parser.add_argument("--ready-file")
     parser.add_argument("--verifier-url", required=True)
     parser.add_argument("--eos-token-id", type=int, required=True)
@@ -94,13 +94,40 @@ def main() -> int:
     return 0
 
 
-def _build_server(*, host: str, port: int, edge_service) -> ThreadingHTTPServer:
+def _build_server(
+    *,
+    host: str,
+    port: int,
+    edge_service,
+) -> ThreadingHTTPServer:
     execution_lock = threading.Lock()
 
     class EdgeHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            try:
+                if self.path != "/":
+                    self.send_error(404, "unknown path")
+                    return
+                self._send_raw(
+                    _load_benchmark_page(),
+                    content_type="text/html; charset=utf-8",
+                )
+            except Exception as exc:
+                self._send_json(
+                    {
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                    status=500,
+                )
+
         def do_POST(self) -> None:  # noqa: N802
             try:
-                if self.path not in {"/generate", "/complete"}:
+                if self.path not in {
+                    "/generate",
+                    "/complete",
+                    "/benchmark_complete",
+                }:
                     self.send_error(404, "unknown path")
                     return
                 payload = _load_json(self.rfile.read(_content_length(self)))
@@ -116,6 +143,15 @@ def _build_server(*, host: str, port: int, edge_service) -> ThreadingHTTPServer:
                     return
 
                 request_kwargs = _edge_complete_request_from_payload(payload)
+                if self.path == "/benchmark_complete":
+                    with execution_lock:
+                        benchmark_response = _run_benchmark_complete(
+                            edge_service=edge_service,
+                            request_kwargs=request_kwargs,
+                        )
+                    self._send_json(benchmark_response)
+                    return
+
                 with execution_lock:
                     text = edge_service.complete(**request_kwargs)
                 self._send_json(
@@ -137,8 +173,17 @@ def _build_server(*, host: str, port: int, edge_service) -> ThreadingHTTPServer:
 
         def _send_json(self, payload: dict, *, status: int = 200) -> None:
             body = _dump_json(payload)
+            self._send_raw(body, status=status, content_type="application/json")
+
+        def _send_raw(
+            self,
+            body: bytes,
+            *,
+            status: int = 200,
+            content_type: str,
+        ) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -208,6 +253,37 @@ def _edge_complete_response_to_payload(*, req_id: str, text: str) -> dict:
     from vllm.dssd.transport.http_utils import edge_complete_response_to_payload
 
     return edge_complete_response_to_payload(req_id=req_id, text=text)
+
+
+def _load_benchmark_page() -> bytes:
+    page_path = Path(__file__).with_name("static") / "edge_benchmark.html"
+    return page_path.read_bytes()
+
+
+def _run_benchmark_complete(*, edge_service, request_kwargs: dict) -> dict:
+    tokenizer = getattr(edge_service, "tokenizer", None)
+    if tokenizer is None:
+        raise RuntimeError("benchmark route requires edge_service.tokenizer")
+
+    prompt_token_ids = list(tokenizer(request_kwargs["prompt"]).input_ids)
+    output_ids, stats = edge_service.generate_with_stats(
+        req_id=request_kwargs["req_id"],
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=request_kwargs["sampling_params"],
+        lora_request=request_kwargs.get("lora_request"),
+    )
+    return {
+        "req_id": request_kwargs["req_id"],
+        "text": tokenizer.decode(list(output_ids), skip_special_tokens=True),
+        "prompt_token_count": len(prompt_token_ids),
+        "output_token_count": len(output_ids),
+        "total_rounds": stats.total_rounds,
+        "total_draft_tokens": stats.total_draft_tokens,
+        "total_accepted_tokens": stats.total_accepted_tokens,
+        "draft_acceptance_rate": stats.draft_acceptance_rate,
+        "all_accept_round_rate": stats.all_accept_round_rate,
+        "avg_accepted_len_per_round": stats.avg_accepted_len_per_round,
+    }
 
 
 def _should_decode_raw_sampling_params(service_factory: str) -> bool:

@@ -405,6 +405,42 @@ def test_edge_service_generate_stops_at_max_tokens_without_requiring_eos() -> No
     assert verifier.close_calls == ["req-1"]
 
 
+def test_edge_service_generate_with_stats_tracks_acceptance() -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    edge_engine = FakeEdgeDecodeEngine()
+    verifier = FakeVerifierTransport(
+        verify_responses=[
+            VerifyRoundResponse(
+                req_id="req-1",
+                accepted_len=2,
+                bonus_token_id=21,
+            )
+        ]
+    )
+    service = DSSDEdgeService(
+        decode_engine=edge_engine,
+        verifier=verifier,
+        eos_token_id=-1,
+        gamma=2,
+    )
+
+    output_ids, stats = service.generate_with_stats(
+        req_id="req-1",
+        prompt_token_ids=[1, 3],
+        sampling_params=SamplingParams(max_tokens=4, temperature=0.0),
+    )
+
+    assert output_ids == [17, 19, 20, 21]
+    assert stats.total_rounds == 1
+    assert stats.total_draft_tokens == 2
+    assert stats.total_accepted_tokens == 2
+    assert stats.all_accept_rounds == 1
+    assert stats.draft_acceptance_rate == 1.0
+    assert stats.all_accept_round_rate == 1.0
+    assert stats.avg_accepted_len_per_round == 2.0
+
+
 def test_edge_service_generate_closes_sessions_when_verify_round_raises() -> None:
     from vllm.dssd.service.edge_service import DSSDEdgeService
 

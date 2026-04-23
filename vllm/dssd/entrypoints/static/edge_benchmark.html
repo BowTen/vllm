@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DSSD Edge Benchmark</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --panel: rgba(255, 252, 246, 0.92);
+      --ink: #1f1e1b;
+      --muted: #6d665c;
+      --accent: #b4492d;
+      --line: rgba(44, 39, 33, 0.14);
+      --shadow: 0 24px 60px rgba(84, 64, 37, 0.14);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "IBM Plex Sans", "Noto Sans SC", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(180, 73, 45, 0.14), transparent 28%),
+        radial-gradient(circle at top right, rgba(114, 88, 55, 0.12), transparent 26%),
+        linear-gradient(180deg, #fbf7f1 0%, var(--bg) 100%);
+      padding: 32px 20px 48px;
+    }
+
+    .shell {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .hero {
+      margin-bottom: 20px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 5vw, 54px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 780px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+    }
+
+    .panel-main {
+      padding: 22px;
+    }
+
+    .panel-side {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    textarea,
+    input[type="number"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.8);
+      color: var(--ink);
+      border-radius: 18px;
+      padding: 14px 16px;
+      font: inherit;
+      resize: vertical;
+    }
+
+    textarea {
+      min-height: 220px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      margin: 18px 0;
+    }
+
+    .number-group {
+      width: 180px;
+    }
+
+    .toggle {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.66);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .toggle input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+
+    button {
+      border: none;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent) 0%, #d06d35 100%);
+      color: #fff8f1;
+      padding: 14px 22px;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .status {
+      min-height: 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status.error {
+      color: #a12619;
+    }
+
+    .metric-card {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 14px 16px;
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+
+    .metric-value {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .metric-sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .result-box {
+      margin-top: 8px;
+      border-radius: 20px;
+      background: rgba(34, 31, 27, 0.94);
+      color: #f5eee5;
+      padding: 18px;
+      min-height: 260px;
+      white-space: pre-wrap;
+      line-height: 1.65;
+      overflow-wrap: anywhere;
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 880px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .number-group {
+        width: 100%;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <p class="eyebrow">DSSD Edge Benchmark</p>
+      <h1>DSSD Edge Benchmark</h1>
+      <p class="subtitle">通过 edge server 直接发起补全请求，浏览器侧测量整次请求耗时，并按是否计入 prompt token 计算 token/s。</p>
+    </div>
+
+    <div class="grid">
+      <section class="panel panel-main">
+        <label for="prompt">输入文本</label>
+        <textarea id="prompt">请用中文简要介绍一下分布式投机采样。</textarea>
+
+        <div class="controls">
+          <div class="number-group">
+            <label for="maxTokens">最大生成长度</label>
+            <input id="maxTokens" type="number" min="1" value="128">
+          </div>
+
+          <label class="toggle" for="includePrompt">
+            <input id="includePrompt" type="checkbox">
+            token/s 计入 prompt token
+          </label>
+
+          <button id="runButton" type="button">开始生成</button>
+        </div>
+
+        <div id="status" class="status">等待请求。</div>
+
+        <label for="result">补全结果</label>
+        <pre id="result" class="result-box"></pre>
+      </section>
+
+      <aside class="panel panel-side">
+        <div class="metric-card">
+          <div class="metric-label">总耗时</div>
+          <div id="elapsed" class="metric-value">0.000 s</div>
+          <div class="metric-sub">浏览器测量，包含网络和服务端处理。</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">token / s</div>
+          <div id="tps" class="metric-value">0.00</div>
+          <div id="tpsMode" class="metric-sub">当前仅统计 output token。</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Prompt Tokens</div>
+          <div id="promptTokens" class="metric-value">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Output Tokens</div>
+          <div id="outputTokens" class="metric-value">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">计费口径 Tokens</div>
+          <div id="measuredTokens" class="metric-value">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Draft Acceptance</div>
+          <div id="draftAcceptance" class="metric-value">0.00%</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">All-Accept Round Rate</div>
+          <div id="allAcceptRounds" class="metric-value">0.00%</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Avg Accepted Len / Round</div>
+          <div id="avgAcceptedLen" class="metric-value">0.00</div>
+        </div>
+
+        <div class="note">
+          页面调用 <code>/benchmark_complete</code>，服务端返回 prompt 和 output 的 token 数，
+          浏览器根据复选框决定 token/s 的分母。
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const promptEl = document.getElementById("prompt");
+    const maxTokensEl = document.getElementById("maxTokens");
+    const includePromptEl = document.getElementById("includePrompt");
+    const runButtonEl = document.getElementById("runButton");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+    const elapsedEl = document.getElementById("elapsed");
+    const tpsEl = document.getElementById("tps");
+    const tpsModeEl = document.getElementById("tpsMode");
+    const promptTokensEl = document.getElementById("promptTokens");
+    const outputTokensEl = document.getElementById("outputTokens");
+    const measuredTokensEl = document.getElementById("measuredTokens");
+    const draftAcceptanceEl = document.getElementById("draftAcceptance");
+    const allAcceptRoundsEl = document.getElementById("allAcceptRounds");
+    const avgAcceptedLenEl = document.getElementById("avgAcceptedLen");
+
+    let lastMetrics = null;
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function renderMetrics() {
+      if (!lastMetrics) {
+        elapsedEl.textContent = "0.000 s";
+        tpsEl.textContent = "0.00";
+        tpsModeEl.textContent = "当前仅统计 output token。";
+        promptTokensEl.textContent = "0";
+        outputTokensEl.textContent = "0";
+        measuredTokensEl.textContent = "0";
+        draftAcceptanceEl.textContent = "0.00%";
+        allAcceptRoundsEl.textContent = "0.00%";
+        avgAcceptedLenEl.textContent = "0.00";
+        return;
+      }
+
+      const includePrompt = includePromptEl.checked;
+      const measuredTokens = includePrompt
+        ? lastMetrics.promptTokenCount + lastMetrics.outputTokenCount
+        : lastMetrics.outputTokenCount;
+      const tps = lastMetrics.elapsedSeconds > 0
+        ? measuredTokens / lastMetrics.elapsedSeconds
+        : 0;
+
+      elapsedEl.textContent = `${lastMetrics.elapsedSeconds.toFixed(3)} s`;
+      tpsEl.textContent = tps.toFixed(2);
+      tpsModeEl.textContent = includePrompt
+        ? "当前统计 prompt + output token。"
+        : "当前仅统计 output token。";
+      promptTokensEl.textContent = String(lastMetrics.promptTokenCount);
+      outputTokensEl.textContent = String(lastMetrics.outputTokenCount);
+      measuredTokensEl.textContent = String(measuredTokens);
+      draftAcceptanceEl.textContent =
+        `${(lastMetrics.draftAcceptanceRate * 100).toFixed(2)}%`;
+      allAcceptRoundsEl.textContent =
+        `${(lastMetrics.allAcceptRoundRate * 100).toFixed(2)}%`;
+      avgAcceptedLenEl.textContent =
+        lastMetrics.avgAcceptedLenPerRound.toFixed(2);
+    }
+
+    async function runBenchmark() {
+      const prompt = promptEl.value;
+      const maxTokens = Number.parseInt(maxTokensEl.value, 10);
+      if (!prompt.trim()) {
+        setStatus("请输入文本。", true);
+        promptEl.focus();
+        return;
+      }
+      if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+        setStatus("max_tokens 必须是正整数。", true);
+        maxTokensEl.focus();
+        return;
+      }
+
+      runButtonEl.disabled = true;
+      resultEl.textContent = "";
+      setStatus("请求中...");
+
+      const reqId = `ui-${Date.now()}`;
+      const startedAt = performance.now();
+
+      try {
+        const response = await fetch("/benchmark_complete", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            req_id: reqId,
+            prompt,
+            sampling_params: {
+              max_tokens: maxTokens,
+              temperature: 0.0
+            },
+            lora_request: null
+          })
+        });
+
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+
+        const elapsedSeconds = (performance.now() - startedAt) / 1000;
+        lastMetrics = {
+          elapsedSeconds,
+          promptTokenCount: payload.prompt_token_count,
+          outputTokenCount: payload.output_token_count,
+          draftAcceptanceRate: payload.draft_acceptance_rate ?? 0,
+          allAcceptRoundRate: payload.all_accept_round_rate ?? 0,
+          avgAcceptedLenPerRound: payload.avg_accepted_len_per_round ?? 0
+        };
+        resultEl.textContent = payload.text || "";
+        renderMetrics();
+        setStatus(`请求完成，req_id=${payload.req_id}`);
+      } catch (error) {
+        lastMetrics = null;
+        renderMetrics();
+        resultEl.textContent = "";
+        setStatus(`请求失败: ${error.message}`, true);
+      } finally {
+        runButtonEl.disabled = false;
+      }
+    }
+
+    includePromptEl.addEventListener("change", renderMetrics);
+    runButtonEl.addEventListener("click", runBenchmark);
+    renderMetrics();
+  </script>
+</body>
+</html>

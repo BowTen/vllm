@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from urllib import error, request
+from urllib import response as urllib_response
 
 import pytest
 
@@ -319,6 +320,88 @@ def test_edge_server_complete_handler_round_trip(monkeypatch) -> None:
     }
 
 
+def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+    server, thread = _start_edge_server(
+        edge_server,
+        edge_service=SimpleNamespace(),
+    )
+
+    try:
+        with _get(server, "/") as response:
+            body = response.read().decode("utf-8")
+            content_type = response.headers["Content-Type"]
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert response.status == 200
+    assert content_type == "text/html; charset=utf-8"
+    assert "DSSD Edge Benchmark" in body
+    assert "benchmark_complete" in body
+    assert "Draft Acceptance" in body
+
+
+def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+
+    class FakeTokenizer:
+        def __call__(self, text):
+            if text == "hello world":
+                return SimpleNamespace(input_ids=[11, 12])
+            raise AssertionError(f"unexpected prompt: {text}")
+
+        def decode(self, output_ids, skip_special_tokens=True):
+            assert skip_special_tokens is True
+            assert output_ids == [7, 8, 9]
+            return "decoded output"
+
+    server, thread = _start_edge_server(
+        edge_server,
+        edge_service=SimpleNamespace(
+            tokenizer=FakeTokenizer(),
+            generate_with_stats=lambda **kwargs: _assert_benchmark_kwargs(kwargs)
+            or (
+                [7, 8, 9],
+                _make_fake_generation_stats(
+                    total_rounds=2,
+                    total_draft_tokens=4,
+                    total_accepted_tokens=3,
+                    all_accept_rounds=1,
+                ),
+            ),
+        ),
+    )
+
+    try:
+        response = _post_json(
+            server,
+            "/benchmark_complete",
+            {
+                "req_id": "req-bench",
+                "prompt": "hello world",
+                "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                "lora_request": None,
+            },
+        )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert response == {
+        "req_id": "req-bench",
+        "text": "decoded output",
+        "prompt_token_count": 2,
+        "output_token_count": 3,
+        "total_rounds": 2,
+        "total_draft_tokens": 4,
+        "total_accepted_tokens": 3,
+        "draft_acceptance_rate": 0.75,
+        "all_accept_round_rate": 0.5,
+        "avg_accepted_len_per_round": 1.5,
+    }
+
+
 def test_edge_server_generate_handler_returns_structured_500(monkeypatch) -> None:
     edge_server = _load_edge_server_module()
     _install_edge_server_http_shims(edge_server, monkeypatch)
@@ -354,6 +437,54 @@ def test_edge_server_generate_handler_returns_structured_500(monkeypatch) -> Non
     }
 
 
+def test_edge_server_benchmark_complete_handler_returns_structured_500(
+    monkeypatch,
+) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+
+    class FakeTokenizer:
+        def __call__(self, text):
+            assert text == "hello world"
+            return SimpleNamespace(input_ids=[11, 12])
+
+        def decode(self, output_ids, skip_special_tokens=True):
+            return "unused"
+
+    def raise_generation_error(**kwargs):
+        _assert_benchmark_kwargs(kwargs)
+        raise RuntimeError("benchmark failed")
+
+    server, thread = _start_edge_server(
+        edge_server,
+        edge_service=SimpleNamespace(
+            tokenizer=FakeTokenizer(),
+            generate_with_stats=raise_generation_error,
+        ),
+    )
+
+    try:
+        with pytest.raises(error.HTTPError) as exc_info:
+            _post_json(
+                server,
+                "/benchmark_complete",
+                {
+                    "req_id": "req-bench",
+                    "prompt": "hello world",
+                    "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                    "lora_request": None,
+                },
+            )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert exc_info.value.code == 500
+    assert json.loads(exc_info.value.read().decode("utf-8")) == {
+        "error": "benchmark failed",
+        "error_type": "RuntimeError",
+    }
+
+
 def _assert_generate_kwargs(kwargs: dict) -> None:
     assert kwargs["req_id"].startswith("req-")
     assert kwargs["sampling_params"] == {
@@ -371,6 +502,42 @@ def _assert_complete_kwargs(kwargs: dict) -> None:
         "temperature": 0.0,
     }
     assert kwargs["lora_request"] is None
+
+
+def _assert_benchmark_kwargs(kwargs: dict) -> None:
+    assert kwargs["req_id"] == "req-bench"
+    assert kwargs["prompt_token_ids"] == [11, 12]
+    assert kwargs["sampling_params"] == {
+        "max_tokens": 4,
+        "temperature": 0.0,
+    }
+    assert kwargs["lora_request"] is None
+
+
+def _make_fake_generation_stats(
+    *,
+    total_rounds: int,
+    total_draft_tokens: int,
+    total_accepted_tokens: int,
+    all_accept_rounds: int,
+):
+    return SimpleNamespace(
+        total_rounds=total_rounds,
+        total_draft_tokens=total_draft_tokens,
+        total_accepted_tokens=total_accepted_tokens,
+        all_accept_rounds=all_accept_rounds,
+        draft_acceptance_rate=(
+            total_accepted_tokens / total_draft_tokens
+            if total_draft_tokens
+            else 0.0
+        ),
+        all_accept_round_rate=(
+            all_accept_rounds / total_rounds if total_rounds else 0.0
+        ),
+        avg_accepted_len_per_round=(
+            total_accepted_tokens / total_rounds if total_rounds else 0.0
+        ),
+    )
 
 
 def _start_edge_server(edge_server, *, edge_service):
@@ -401,6 +568,14 @@ def _post_json(server, path: str, payload: dict) -> dict:
     )
     with request.urlopen(http_request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _get(server, path: str) -> urllib_response.addinfourl:
+    http_request = request.Request(
+        url=f"http://127.0.0.1:{server.server_address[1]}{path}",
+        method="GET",
+    )
+    return request.urlopen(http_request, timeout=5)
 
 
 def _install_edge_server_http_shims(edge_server, monkeypatch) -> None:

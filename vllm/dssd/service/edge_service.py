@@ -1,11 +1,46 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm.dssd.edge.types import EdgeOpenSessionResult
 from vllm.dssd.protocol import VerifyRoundRequest
 
 _GREEDY_TEMPERATURE_EPS = 1e-5
+
+
+@dataclass
+class EdgeGenerationStats:
+    total_rounds: int = 0
+    total_draft_tokens: int = 0
+    total_accepted_tokens: int = 0
+    all_accept_rounds: int = 0
+
+    @property
+    def draft_acceptance_rate(self) -> float:
+        if self.total_draft_tokens <= 0:
+            return 0.0
+        return self.total_accepted_tokens / self.total_draft_tokens
+
+    @property
+    def all_accept_round_rate(self) -> float:
+        if self.total_rounds <= 0:
+            return 0.0
+        return self.all_accept_rounds / self.total_rounds
+
+    @property
+    def avg_accepted_len_per_round(self) -> float:
+        if self.total_rounds <= 0:
+            return 0.0
+        return self.total_accepted_tokens / self.total_rounds
+
+    def record_round(self, *, draft_len: int, accepted_len: int) -> None:
+        self.total_rounds += 1
+        self.total_draft_tokens += int(draft_len)
+        self.total_accepted_tokens += int(accepted_len)
+        if accepted_len == draft_len:
+            self.all_accept_rounds += 1
 
 
 class DSSDEdgeService:
@@ -65,9 +100,26 @@ class DSSDEdgeService:
         sampling_params,
         lora_request=None,
     ) -> list[int]:
+        output_ids, _ = self.generate_with_stats(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
+        return output_ids
+
+    def generate_with_stats(
+        self,
+        *,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> tuple[list[int], EdgeGenerationStats]:
         max_tokens = sampling_params.max_tokens or 0
+        stats = EdgeGenerationStats()
         if max_tokens <= 0:
-            return []
+            return [], stats
 
         opened = self.open_session(
             req_id=req_id,
@@ -103,6 +155,10 @@ class DSSDEdgeService:
                         draft_q_values=list(round_state.draft_q_values),
                     )
                 )
+                stats.record_round(
+                    draft_len=len(round_state.draft_token_ids),
+                    accepted_len=response.accepted_len,
+                )
                 committed_token_id, committed_count = self._commit_verify_result(
                     session,
                     response,
@@ -116,7 +172,7 @@ class DSSDEdgeService:
                     self._rollback_tokens_after_recent_eos(session, committed_count)
                     break
 
-            return session.committed_output_ids()
+            return session.committed_output_ids(), stats
         finally:
             if req_id in self.decode_engine.sessions:
                 self.close_session(req_id)
