@@ -50,6 +50,53 @@ def open_session_request_from_payload(payload: dict[str, Any]) -> OpenSessionReq
     )
 
 
+def edge_generate_request_to_payload(
+    *,
+    req_id: str,
+    prompt_token_ids: list[int],
+    sampling_params: SamplingParams,
+    lora_request: LoRARequest | None = None,
+) -> dict[str, Any]:
+    return {
+        "req_id": req_id,
+        "prompt_token_ids": list(prompt_token_ids),
+        "sampling_params": msgspec.to_builtins(sampling_params),
+        "lora_request": (
+            None if lora_request is None else msgspec.to_builtins(lora_request)
+        ),
+    }
+
+
+def edge_generate_request_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "req_id": payload["req_id"],
+        "prompt_token_ids": list(payload["prompt_token_ids"]),
+        "sampling_params": msgspec.convert(
+            payload["sampling_params"],
+            type=SamplingParams,
+        ),
+        "lora_request": _decode_lora_request(payload.get("lora_request")),
+    }
+
+
+def edge_generate_response_to_payload(
+    *,
+    req_id: str,
+    output_ids: list[int],
+) -> dict[str, Any]:
+    return {
+        "req_id": req_id,
+        "output_ids": list(output_ids),
+    }
+
+
+def edge_generate_response_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "req_id": payload["req_id"],
+        "output_ids": list(payload["output_ids"]),
+    }
+
+
 def open_session_response_to_payload(
     response: OpenSessionResponse,
 ) -> dict[str, Any]:
