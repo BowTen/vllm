@@ -10,7 +10,7 @@ Add the smallest possible persistent edge-side service for DSSD so one edge runt
 - Support one synchronous `POST /generate` API.
 - Reuse the existing `DSSDEdgeService.generate(...)` flow unchanged.
 - Process requests serially in a single server process.
-- Return a clear busy error when another request is already running.
+- Block and wait when another request is already running.
 
 **Out of Scope**
 
@@ -43,7 +43,7 @@ At request time it will:
 
 1. Accept `POST /generate`.
 2. Decode the JSON request body into the arguments needed by `DSSDEdgeService.generate(...)`.
-3. Reject the request with `409` if another request is already executing.
+3. If another request is already executing, wait until it completes.
 4. Otherwise call `edge_service.generate(...)`.
 5. Return a JSON body containing `req_id` and `output_ids`.
 
@@ -69,19 +69,17 @@ Response body:
 
 This API intentionally mirrors the existing `edge_runner` call boundary instead of exposing lower-level session operations. The current `generate(...)` implementation already performs `open_session -> draft/verify loop -> close_session`, so adding a thinner transport wrapper is the lowest-risk option.
 
-**Busy Semantics**
+**Serial Execution Semantics**
 
 The server must remain single-request-at-a-time.
 
 The simplest behavior is:
 
 - keep one in-process lock guarding request execution
-- if a request arrives while the lock is held, return HTTP `409`
-- response body:
-  - `error`
-  - `error_type` set to `"EdgeBusyError"`
+- if a request arrives while the lock is held, block until the lock becomes available
+- after the earlier request completes, run the waiting request normally in the same process
 
-Returning `409` is better than blocking the second request indefinitely because it makes the serialization constraint explicit and keeps failure behavior easy to test.
+This preserves the strict serial constraint without forcing clients to implement retry logic. Because the current requirement is “single-request, simplest possible persistent service”, in-process waiting is the smallest behavioral change from a normal synchronous server.
 
 **Code Structure**
 
@@ -135,14 +133,11 @@ This preserves the current subprocess-based integration testing pattern.
 
 **Error Handling**
 
-The server should map failures into three buckets:
+The server should map failures into two buckets:
 
 1. Unknown route
    - HTTP `404`
-2. Busy server
-   - HTTP `409`
-   - JSON body with `error` and `error_type="EdgeBusyError"`
-3. Request decode or generation failure
+2. Request decode or generation failure
    - HTTP `500`
    - JSON body with `error` and `error_type`
 
@@ -162,10 +157,11 @@ Add focused tests in the existing entrypoint and transport suites.
    - call `/generate` and assert JSON output
    - verify repeated sequential requests succeed against the same process
 
-3. Busy-path tests
+3. Serial wait tests
    - use a blocking fake service to hold the lock
    - send a second request while the first is active
-   - assert HTTP `409` with structured error JSON
+   - assert the second request does not fail
+   - release the first request and assert the second request completes afterward
 
 4. Failure-path tests
    - service raises during `generate`
@@ -176,7 +172,7 @@ This is enough to prove that the server is persistent, serial, and reuses the ex
 **Tradeoffs**
 
 - This is intentionally not a full edge session protocol. It is a wrapper around the existing synchronous `generate(...)` API.
-- `409 busy` keeps the implementation simple, but clients must retry themselves.
+- Blocking wait keeps the client contract simpler, but a stuck request can delay all later requests.
 - `ThreadingHTTPServer` is acceptable even for serial mode because the lock enforces one active request; reusing the verifier server shape keeps code churn low.
 
 **Future Extensions**
@@ -185,7 +181,7 @@ If later needed, this design can expand in-place to:
 
 - add edge-side streaming endpoints
 - add explicit `/open_session` and `/close_session`
-- replace `409 busy` with a queue
+- replace the implicit lock wait with an explicit bounded queue
 - attach request metrics or tracing
 
 None of those are required for the first persistent edge server.
