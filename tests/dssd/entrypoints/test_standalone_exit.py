@@ -340,6 +340,8 @@ def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
     assert "DSSD Edge Benchmark" in body
     assert "benchmark_complete" in body
     assert "Draft Acceptance" in body
+    assert "服务端推理耗时" in body
+    assert "服务端 token / s" in body
     assert "采样温度" in body
     assert "temperature: temperature" in body
 
@@ -347,6 +349,13 @@ def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
 def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
     edge_server = _load_edge_server_module()
     _install_edge_server_http_shims(edge_server, monkeypatch)
+    perf_times = iter([10.0, 12.5])
+    monkeypatch.setattr(
+        edge_server,
+        "time",
+        SimpleNamespace(perf_counter=lambda: next(perf_times)),
+        raising=False,
+    )
 
     class FakeTokenizer:
         def __call__(self, text):
@@ -393,6 +402,7 @@ def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
     assert response == {
         "req_id": "req-bench",
         "text": "decoded output",
+        "server_inference_seconds": 2.5,
         "prompt_token_count": 2,
         "output_token_count": 3,
         "total_rounds": 2,

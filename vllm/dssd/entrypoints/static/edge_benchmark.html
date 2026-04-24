@@ -278,6 +278,18 @@
         </div>
 
         <div class="metric-card">
+          <div class="metric-label">服务端推理耗时</div>
+          <div id="serverInferenceElapsed" class="metric-value">0.000 s</div>
+          <div class="metric-sub">仅统计服务端 generate_with_stats 调用。</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">服务端 token / s</div>
+          <div id="serverInferenceTps" class="metric-value">0.00</div>
+          <div id="serverInferenceTpsMode" class="metric-sub">当前仅统计 output token。</div>
+        </div>
+
+        <div class="metric-card">
           <div class="metric-label">Prompt Tokens</div>
           <div id="promptTokens" class="metric-value">0</div>
         </div>
@@ -326,6 +338,9 @@
     const elapsedEl = document.getElementById("elapsed");
     const tpsEl = document.getElementById("tps");
     const tpsModeEl = document.getElementById("tpsMode");
+    const serverInferenceElapsedEl = document.getElementById("serverInferenceElapsed");
+    const serverInferenceTpsEl = document.getElementById("serverInferenceTps");
+    const serverInferenceTpsModeEl = document.getElementById("serverInferenceTpsMode");
     const promptTokensEl = document.getElementById("promptTokens");
     const outputTokensEl = document.getElementById("outputTokens");
     const measuredTokensEl = document.getElementById("measuredTokens");
@@ -345,6 +360,9 @@
         elapsedEl.textContent = "0.000 s";
         tpsEl.textContent = "0.00";
         tpsModeEl.textContent = "当前仅统计 output token。";
+        serverInferenceElapsedEl.textContent = "0.000 s";
+        serverInferenceTpsEl.textContent = "0.00";
+        serverInferenceTpsModeEl.textContent = "当前仅统计 output token。";
         promptTokensEl.textContent = "0";
         outputTokensEl.textContent = "0";
         measuredTokensEl.textContent = "0";
@@ -361,10 +379,19 @@
       const tps = lastMetrics.elapsedSeconds > 0
         ? measuredTokens / lastMetrics.elapsedSeconds
         : 0;
+      const serverInferenceTps = lastMetrics.serverInferenceSeconds > 0
+        ? measuredTokens / lastMetrics.serverInferenceSeconds
+        : 0;
 
       elapsedEl.textContent = `${lastMetrics.elapsedSeconds.toFixed(3)} s`;
       tpsEl.textContent = tps.toFixed(2);
       tpsModeEl.textContent = includePrompt
+        ? "当前统计 prompt + output token。"
+        : "当前仅统计 output token。";
+      serverInferenceElapsedEl.textContent =
+        `${lastMetrics.serverInferenceSeconds.toFixed(3)} s`;
+      serverInferenceTpsEl.textContent = serverInferenceTps.toFixed(2);
+      serverInferenceTpsModeEl.textContent = includePrompt
         ? "当前统计 prompt + output token。"
         : "当前仅统计 output token。";
       promptTokensEl.textContent = String(lastMetrics.promptTokenCount);
@@ -428,6 +455,7 @@
         const elapsedSeconds = (performance.now() - startedAt) / 1000;
         lastMetrics = {
           elapsedSeconds,
+          serverInferenceSeconds: payload.server_inference_seconds ?? 0,
           promptTokenCount: payload.prompt_token_count,
           outputTokenCount: payload.output_token_count,
           draftAcceptanceRate: payload.draft_acceptance_rate ?? 0,

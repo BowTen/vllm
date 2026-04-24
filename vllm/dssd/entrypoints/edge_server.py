@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,15 +267,18 @@ def _run_benchmark_complete(*, edge_service, request_kwargs: dict) -> dict:
         raise RuntimeError("benchmark route requires edge_service.tokenizer")
 
     prompt_token_ids = list(tokenizer(request_kwargs["prompt"]).input_ids)
+    inference_start = time.perf_counter()
     output_ids, stats = edge_service.generate_with_stats(
         req_id=request_kwargs["req_id"],
         prompt_token_ids=prompt_token_ids,
         sampling_params=request_kwargs["sampling_params"],
         lora_request=request_kwargs.get("lora_request"),
     )
+    server_inference_seconds = time.perf_counter() - inference_start
     return {
         "req_id": request_kwargs["req_id"],
         "text": tokenizer.decode(list(output_ids), skip_special_tokens=True),
+        "server_inference_seconds": server_inference_seconds,
         "prompt_token_count": len(prompt_token_ids),
         "output_token_count": len(output_ids),
         "total_rounds": stats.total_rounds,
