@@ -27,12 +27,19 @@ class VerifierRoundResult:
     req_id: str
     accepted_len: int
     bonus_token_id: int | None = None
+    rejected_token_id: int | None = None
     rejected_target_logits: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
-        has_bonus = self.bonus_token_id is not None
-        has_reject_logits = self.rejected_target_logits is not None
-        if has_bonus == has_reject_logits:
+        payload_count = sum(
+            payload is not None
+            for payload in (
+                self.bonus_token_id,
+                self.rejected_token_id,
+                self.rejected_target_logits,
+            )
+        )
+        if payload_count != 1:
             raise ValueError(
                 "VerifierRoundResult requires exactly one bypass payload"
             )
@@ -41,7 +48,10 @@ class VerifierRoundResult:
         return self.bonus_token_id is not None
 
     def is_rejected(self) -> bool:
-        return self.rejected_target_logits is not None
+        return (
+            self.rejected_token_id is not None
+            or self.rejected_target_logits is not None
+        )
 
 
 @dataclass

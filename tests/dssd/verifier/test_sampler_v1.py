@@ -261,3 +261,28 @@ def test_greedy_round_accepts_matching_draft_tokens_by_argmax() -> None:
     assert result.accepted_len == 2
     assert result.bonus_token_id == 2
     assert result.rejected_target_logits is None
+
+
+def test_greedy_round_reject_returns_target_argmax_token_without_logits() -> None:
+    sampler = DSSDVerifierSamplerV1(_OldSampler())
+    logits = torch.tensor(
+        [[4.0, 1.0, 0.0], [0.0, 1.0, 4.0], [0.0, 0.0, 4.0]],
+        dtype=torch.float32,
+    )
+
+    result = sampler.verify_round(
+        logits=logits,
+        spec_decode_metadata=_metadata(torch.device("cpu")),
+        sampling_metadata=_greedy_sampling_metadata(),
+        request=VerifierRoundRequest(
+            req_id="req-1",
+            committed_token_id=7,
+            draft_token_ids=[0, 1],
+            draft_q_values=[100.0, 100.0],
+        ),
+    )
+
+    assert result.accepted_len == 1
+    assert result.rejected_token_id == 2
+    assert result.rejected_target_logits is None
+    assert result.bonus_token_id is None

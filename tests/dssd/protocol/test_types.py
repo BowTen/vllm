@@ -109,6 +109,11 @@ def test_verify_round_response_requires_exactly_one_bypass_payload(
         accepted_len=0,
         rejected_target_logits=object(),
     )
+    protocol_modules.VerifyRoundResponse(
+        req_id="r",
+        accepted_len=0,
+        rejected_token_id=8,
+    )
 
     with pytest.raises(ValueError, match="exactly one bypass payload"):
         protocol_modules.VerifyRoundResponse(req_id="r", accepted_len=0)
@@ -119,6 +124,14 @@ def test_verify_round_response_requires_exactly_one_bypass_payload(
             accepted_len=0,
             bonus_token_id=7,
             rejected_target_logits=object(),
+        )
+
+    with pytest.raises(ValueError, match="exactly one bypass payload"):
+        protocol_modules.VerifyRoundResponse(
+            req_id="r",
+            accepted_len=0,
+            rejected_target_logits=object(),
+            rejected_token_id=8,
         )
 
 

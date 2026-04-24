@@ -348,6 +348,46 @@ def test_edge_service_greedy_reject_path_uses_target_argmax(
     assert token_id == 2
 
 
+def test_edge_service_greedy_reject_path_uses_rejected_token_without_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    def fail_argmax(*_args, **_kwargs):
+        raise AssertionError("greedy rejected_token_id path must not inspect logits")
+
+    monkeypatch.setattr(torch, "argmax", fail_argmax)
+    service = DSSDEdgeService(
+        decode_engine=FakeEdgeDecodeEngine(),
+        verifier=FakeVerifierTransport(verify_responses=[]),
+        eos_token_id=2,
+        gamma=2,
+    )
+    session = FakeSession(
+        req_id="req-1",
+        prompt_len=2,
+        token_ids=[1, 3, 17, 19, 20],
+        sampling_params=SamplingParams(temperature=0.0),
+        round_state=FakeRoundState(
+            draft_token_ids=[19, 20],
+            draft_q_values=[0.6, 0.4],
+            draft_logits_rows=[
+                torch.zeros(8, dtype=torch.float32),
+                torch.zeros(8, dtype=torch.float32),
+            ],
+        ),
+    )
+    response = VerifyRoundResponse(
+        req_id="req-1",
+        accepted_len=1,
+        rejected_token_id=6,
+    )
+
+    token_id = service._resample_rejected_token(session, response)  # noqa: SLF001
+
+    assert token_id == 6
+
+
 def test_edge_service_close_session_closes_both_sides() -> None:
     from vllm.dssd.service.edge_service import DSSDEdgeService
 

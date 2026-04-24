@@ -127,3 +127,31 @@ def test_edge_complete_request_and_response_round_trip() -> None:
         "req_id": "req-text",
         "text": " and then",
     }
+
+
+def test_verify_round_response_round_trips_rejected_token_as_json() -> None:
+    from vllm.dssd.protocol import VerifyRoundResponse
+    from vllm.dssd.transport.http_utils import (
+        verify_round_response_from_http_payload,
+        verify_round_response_to_http_payload,
+    )
+
+    content_type, payload = verify_round_response_to_http_payload(
+        VerifyRoundResponse(
+            req_id="req-1",
+            accepted_len=1,
+            rejected_token_id=42,
+        )
+    )
+
+    decoded = verify_round_response_from_http_payload(
+        content_type=content_type,
+        payload=payload,
+    )
+
+    assert content_type == "application/json"
+    assert decoded.req_id == "req-1"
+    assert decoded.accepted_len == 1
+    assert decoded.rejected_token_id == 42
+    assert decoded.bonus_token_id is None
+    assert decoded.rejected_target_logits is None

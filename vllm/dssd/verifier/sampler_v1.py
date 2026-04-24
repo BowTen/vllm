@@ -75,8 +75,7 @@ class DSSDVerifierSamplerV1:
                 return VerifierRoundResult(
                     req_id=request.req_id,
                     accepted_len=reject_idx,
-                    rejected_target_logits=processed_target_logits[reject_idx].detach(
-                    ).clone(),
+                    rejected_token_id=int(target_argmax[reject_idx].item()),
                 )
 
             bonus_output = self.sampler(

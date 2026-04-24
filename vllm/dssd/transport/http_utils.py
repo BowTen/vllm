@@ -210,6 +210,7 @@ def verify_round_response_to_payload(
         "req_id": response.req_id,
         "accepted_len": response.accepted_len,
         "bonus_token_id": response.bonus_token_id,
+        "rejected_token_id": response.rejected_token_id,
         "rejected_target_logits": _encode_tensor(response.rejected_target_logits),
     }
 
@@ -223,6 +224,7 @@ def verify_round_response_from_payload(
         req_id=payload["req_id"],
         accepted_len=payload["accepted_len"],
         bonus_token_id=payload.get("bonus_token_id"),
+        rejected_token_id=payload.get("rejected_token_id"),
         rejected_target_logits=_decode_tensor(payload.get("rejected_target_logits")),
     )
 
@@ -247,6 +249,7 @@ def verify_round_response_to_http_payload(
             "req_id": response.req_id,
             "accepted_len": response.accepted_len,
             "bonus_token_id": None,
+            "rejected_token_id": None,
             "dtype": "float32",
             "shape": list(logits.shape),
         }
@@ -383,6 +386,7 @@ def _decode_binary_verify_round_response(payload: bytes) -> VerifyRoundResponse:
             req_id=metadata["req_id"],
             accepted_len=int(metadata["accepted_len"]),
             bonus_token_id=metadata.get("bonus_token_id"),
+            rejected_token_id=metadata.get("rejected_token_id"),
             rejected_target_logits=logits,
         )
     except (KeyError, TypeError, ValueError) as exc:

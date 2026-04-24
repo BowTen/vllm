@@ -32,6 +32,7 @@ class DSSDVerifierService:
             req_id=result.req_id,
             accepted_len=result.accepted_len,
             bonus_token_id=result.bonus_token_id,
+            rejected_token_id=getattr(result, "rejected_token_id", None),
             rejected_target_logits=result.rejected_target_logits,
         )
 

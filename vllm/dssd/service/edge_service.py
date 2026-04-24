@@ -226,11 +226,19 @@ class DSSDEdgeService:
 
     def _resample_rejected_token(self, session, response) -> int:
         rejected_index = response.accepted_len
-        if response.rejected_target_logits is None:
-            raise RuntimeError("rejected verifier response requires logits")
+        rejected_token_id = getattr(response, "rejected_token_id", None)
 
         if self._is_greedy_session(session):
+            if rejected_token_id is not None:
+                return int(rejected_token_id)
+            if response.rejected_target_logits is None:
+                raise RuntimeError(
+                    "greedy rejected verifier response requires token_id or logits"
+                )
             return int(torch.argmax(response.rejected_target_logits).item())
+
+        if response.rejected_target_logits is None:
+            raise RuntimeError("rejected verifier response requires logits")
 
         q_logits = session.round_state.q_dist_at(rejected_index)
         p_logits = response.rejected_target_logits.to(
