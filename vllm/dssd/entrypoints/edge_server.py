@@ -145,6 +145,7 @@ def _build_server(
 
                 request_kwargs = _edge_complete_request_from_payload(payload)
                 if self.path == "/benchmark_complete":
+                    request_kwargs["mode"] = payload.get("mode", "dssd")
                     with execution_lock:
                         benchmark_response = _run_benchmark_complete(
                             edge_service=edge_service,
@@ -266,27 +267,50 @@ def _run_benchmark_complete(*, edge_service, request_kwargs: dict) -> dict:
     if tokenizer is None:
         raise RuntimeError("benchmark route requires edge_service.tokenizer")
 
+    mode = request_kwargs.pop("mode", "dssd")
+    if mode not in {"dssd", "target_only"}:
+        raise ValueError("benchmark mode must be one of {'dssd', 'target_only'}")
+
     prompt_token_ids = list(tokenizer(request_kwargs["prompt"]).input_ids)
     inference_start = time.perf_counter()
-    output_ids, stats = edge_service.generate_with_stats(
-        req_id=request_kwargs["req_id"],
-        prompt_token_ids=prompt_token_ids,
-        sampling_params=request_kwargs["sampling_params"],
-        lora_request=request_kwargs.get("lora_request"),
-    )
+    if mode == "target_only":
+        verifier = getattr(edge_service, "verifier", None)
+        if verifier is None or not hasattr(verifier, "generate"):
+            raise RuntimeError("target-only mode requires edge_service.verifier.generate")
+        output_ids = verifier.generate(
+            req_id=request_kwargs["req_id"],
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=request_kwargs["sampling_params"],
+            lora_request=request_kwargs.get("lora_request"),
+        )
+        stats = None
+    else:
+        output_ids, stats = edge_service.generate_with_stats(
+            req_id=request_kwargs["req_id"],
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=request_kwargs["sampling_params"],
+            lora_request=request_kwargs.get("lora_request"),
+        )
     server_inference_seconds = time.perf_counter() - inference_start
     return {
         "req_id": request_kwargs["req_id"],
+        "mode": mode,
         "text": tokenizer.decode(list(output_ids), skip_special_tokens=True),
         "server_inference_seconds": server_inference_seconds,
         "prompt_token_count": len(prompt_token_ids),
         "output_token_count": len(output_ids),
-        "total_rounds": stats.total_rounds,
-        "total_draft_tokens": stats.total_draft_tokens,
-        "total_accepted_tokens": stats.total_accepted_tokens,
-        "draft_acceptance_rate": stats.draft_acceptance_rate,
-        "all_accept_round_rate": stats.all_accept_round_rate,
-        "avg_accepted_len_per_round": stats.avg_accepted_len_per_round,
+        "total_rounds": 0 if stats is None else stats.total_rounds,
+        "total_draft_tokens": 0 if stats is None else stats.total_draft_tokens,
+        "total_accepted_tokens": 0 if stats is None else stats.total_accepted_tokens,
+        "draft_acceptance_rate": (
+            None if stats is None else stats.draft_acceptance_rate
+        ),
+        "all_accept_round_rate": (
+            None if stats is None else stats.all_accept_round_rate
+        ),
+        "avg_accepted_len_per_round": (
+            None if stats is None else stats.avg_accepted_len_per_round
+        ),
     }
 
 

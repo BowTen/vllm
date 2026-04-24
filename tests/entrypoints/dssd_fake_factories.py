@@ -40,6 +40,17 @@ class _FakeVerifierEngine:
         self.sessions[req_id] = object()
         return _FakeOpenResult(req_id=req_id, bootstrap_token_id=17)
 
+    def generate_local(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        del prompt_token_ids, sampling_params, lora_request
+        self.sessions.pop(req_id, None)
+        return [31, 32, 33]
+
     def verify_round(self, session, request) -> _FakeVerifyResult:
         return _FakeVerifyResult(
             req_id=request.req_id,

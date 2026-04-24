@@ -25,6 +25,14 @@ class DSSDVerifierService:
             bootstrap_token_id=result.bootstrap_token_id,
         )
 
+    def generate(self, request: OpenSessionRequest) -> list[int]:
+        return self.decode_engine.generate_local(
+            req_id=request.req_id,
+            prompt_token_ids=request.prompt_token_ids,
+            sampling_params=request.sampling_params,
+            lora_request=request.lora_request,
+        )
+
     def verify_round(self, request: VerifyRoundRequest) -> VerifyRoundResponse:
         session = self.decode_engine.sessions[request.req_id]
         result = self.decode_engine.verify_round(session, request)

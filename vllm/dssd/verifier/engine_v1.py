@@ -91,12 +91,6 @@ class VerifierDecodeEngineV1:
         )
         session = self.sessions[req_id]
         bootstrap_token_id = opened.bootstrap_token_id
-        self.state_bridge.inject_local_token(
-            session,
-            bootstrap_token_id,
-            self.model_runner,
-            computed_delta=1,
-        )
         output_token_ids = [bootstrap_token_id]
 
         try:
@@ -107,10 +101,20 @@ class VerifierDecodeEngineV1:
                 return output_token_ids
 
             while len(output_token_ids) < max_tokens:
-                next_token_id = self.decode_one_local(
+                response = self.verify_round(
                     session,
-                    output_token_ids[-1],
+                    VerifierRoundRequest(
+                        req_id=req_id,
+                        committed_token_id=output_token_ids[-1],
+                        draft_token_ids=[],
+                        draft_q_values=[],
+                    ),
                 )
+                if response.bonus_token_id is None:
+                    raise RuntimeError(
+                        "empty verifier round requires bonus_token_id"
+                    )
+                next_token_id = response.bonus_token_id
                 output_token_ids.append(next_token_id)
                 if self._should_stop_local_generation(
                     sampling_params,

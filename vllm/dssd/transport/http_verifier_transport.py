@@ -13,6 +13,7 @@ from .http_utils import (
     close_session_ack_from_payload,
     close_session_request_to_payload,
     dump_json,
+    edge_generate_response_from_payload,
     load_json,
     open_session_request_to_payload,
     open_session_response_from_payload,
@@ -61,6 +62,27 @@ class HTTPVerifierTransport:
         )
         response = open_session_response_from_payload(load_json(payload))
         return response
+
+    def generate(
+        self,
+        *,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        request = OpenSessionRequest(
+            req_id=req_id,
+            prompt_token_ids=list(prompt_token_ids),
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+        )
+        payload, _content_type = self._post(
+            path="/generate",
+            payload=open_session_request_to_payload(request),
+        )
+        response = edge_generate_response_from_payload(load_json(payload))
+        return list(response["output_ids"])
 
     def verify_round(self, request):
         remote_req_id = self._remote_req_ids.get(request.req_id, request.req_id)

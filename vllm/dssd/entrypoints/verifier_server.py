@@ -15,6 +15,7 @@ from vllm.dssd.transport.http_utils import (
     close_session_ack_to_payload,
     close_session_request_from_payload,
     dump_json,
+    edge_generate_response_to_payload,
     load_json,
     open_session_request_from_payload,
     open_session_response_to_payload,
@@ -98,6 +99,16 @@ def _build_server(
                     request = open_session_request_from_payload(payload)
                     response = verifier_service.open_session(request)
                     self._send_json(open_session_response_to_payload(response))
+                    return
+                if self.path == "/generate":
+                    request = open_session_request_from_payload(payload)
+                    output_ids = verifier_service.generate(request)
+                    self._send_json(
+                        edge_generate_response_to_payload(
+                            req_id=request.req_id,
+                            output_ids=list(output_ids),
+                        )
+                    )
                     return
                 if self.path == "/verify_round":
                     request = verify_round_request_from_payload(payload)

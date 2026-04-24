@@ -113,6 +113,26 @@ def test_http_verifier_transport_round_trips_across_server_process(
     assert ack == CloseSessionAck(req_id="req-1")
 
 
+def test_http_verifier_transport_generate_uses_verifier_target_only(
+    tmp_path: Path,
+) -> None:
+    from vllm.dssd.transport.http_verifier_transport import HTTPVerifierTransport
+
+    proc, server_url = _start_verifier_server(tmp_path)
+    try:
+        transport = HTTPVerifierTransport(server_url=server_url)
+        output_ids = transport.generate(
+            req_id="target-1",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(max_tokens=4, temperature=0.0),
+            lora_request=None,
+        )
+    finally:
+        _stop_process(proc)
+
+    assert output_ids == [31, 32, 33]
+
+
 def test_edge_runner_cli_can_generate_via_http_verifier_server(tmp_path: Path) -> None:
     proc, server_url = _start_verifier_server(tmp_path)
     env = os.environ.copy()

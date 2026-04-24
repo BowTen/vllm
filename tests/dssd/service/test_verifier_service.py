@@ -32,6 +32,9 @@ class FakeVerifyResult:
 class FakeVerifierEngine:
     def __init__(self) -> None:
         self.open_calls: list[tuple[str, list[int], object, object | None]] = []
+        self.generate_local_calls: list[
+            tuple[str, list[int], object, object | None]
+        ] = []
         self.verify_calls: list[tuple[object, object]] = []
         self.close_calls: list[object] = []
         self.sessions = {"req-1": object()}
@@ -49,6 +52,18 @@ class FakeVerifierEngine:
         session = object()
         self.sessions[req_id] = session
         return FakeOpenResult(req_id=req_id, bootstrap_token_id=11)
+
+    def generate_local(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        lora_request=None,
+    ) -> list[int]:
+        self.generate_local_calls.append(
+            (req_id, list(prompt_token_ids), sampling_params, lora_request)
+        )
+        return [31, 32, 33]
 
     def verify_round(self, session, request) -> FakeVerifyResult:
         self.verify_calls.append((session, request))
@@ -79,6 +94,26 @@ def test_verifier_service_open_session_delegates_to_decode_engine() -> None:
     assert result.req_id == "req-1"
     assert result.bootstrap_token_id == 11
     assert engine.open_calls == [("req-1", [1, 2, 3], sampling_params, None)]
+
+
+def test_verifier_service_generate_uses_local_target_engine() -> None:
+    from vllm.dssd.service.verifier_service import DSSDVerifierService
+
+    engine = FakeVerifierEngine()
+    service = DSSDVerifierService(decode_engine=engine)
+    sampling_params = SamplingParams(max_tokens=8, temperature=0.0)
+    request = OpenSessionRequest(
+        req_id="req-target",
+        prompt_token_ids=[4, 5],
+        sampling_params=sampling_params,
+    )
+
+    result = service.generate(request)
+
+    assert result == [31, 32, 33]
+    assert engine.generate_local_calls == [
+        ("req-target", [4, 5], sampling_params, None)
+    ]
 
 
 def test_verifier_service_verify_round_uses_session_by_req_id() -> None:

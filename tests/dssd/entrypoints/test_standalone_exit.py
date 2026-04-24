@@ -340,6 +340,8 @@ def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
     assert "DSSD Edge Benchmark" in body
     assert "benchmark_complete" in body
     assert "Draft Acceptance" in body
+    assert "Target-only" in body
+    assert "mode: selectedMode" in body
     assert "服务端推理耗时" in body
     assert "服务端 token / s" in body
     assert "采样温度" in body
@@ -391,6 +393,7 @@ def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
             "/benchmark_complete",
             {
                 "req_id": "req-bench",
+                "mode": "dssd",
                 "prompt": "hello world",
                 "sampling_params": {"max_tokens": 4, "temperature": 0.0},
                 "lora_request": None,
@@ -401,6 +404,7 @@ def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
 
     assert response == {
         "req_id": "req-bench",
+        "mode": "dssd",
         "text": "decoded output",
         "server_inference_seconds": 2.5,
         "prompt_token_count": 2,
@@ -411,6 +415,86 @@ def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
         "draft_acceptance_rate": 0.75,
         "all_accept_round_rate": 0.5,
         "avg_accepted_len_per_round": 1.5,
+    }
+
+
+def test_edge_server_benchmark_complete_target_only_uses_verifier_generate(
+    monkeypatch,
+) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+    perf_times = iter([1.0, 1.75])
+    monkeypatch.setattr(
+        edge_server,
+        "time",
+        SimpleNamespace(perf_counter=lambda: next(perf_times)),
+        raising=False,
+    )
+
+    class FakeTokenizer:
+        def __call__(self, text):
+            assert text == "hello world"
+            return SimpleNamespace(input_ids=[11, 12])
+
+        def decode(self, output_ids, skip_special_tokens=True):
+            assert skip_special_tokens is True
+            assert output_ids == [31, 32]
+            return "target output"
+
+    class FakeVerifier:
+        def __init__(self) -> None:
+            self.generate_calls = []
+
+        def generate(self, **kwargs):
+            self.generate_calls.append(kwargs)
+            return [31, 32]
+
+    fake_verifier = FakeVerifier()
+    edge_service = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        verifier=fake_verifier,
+        generate_with_stats=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("target-only mode must not call DSSD generation")
+        ),
+    )
+    server, thread = _start_edge_server(edge_server, edge_service=edge_service)
+
+    try:
+        response = _post_json(
+            server,
+            "/benchmark_complete",
+            {
+                "req_id": "req-target",
+                "mode": "target_only",
+                "prompt": "hello world",
+                "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                "lora_request": None,
+            },
+        )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert fake_verifier.generate_calls == [
+        {
+            "req_id": "req-target",
+            "prompt_token_ids": [11, 12],
+            "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+            "lora_request": None,
+        }
+    ]
+    assert response == {
+        "req_id": "req-target",
+        "mode": "target_only",
+        "text": "target output",
+        "server_inference_seconds": 0.75,
+        "prompt_token_count": 2,
+        "output_token_count": 2,
+        "total_rounds": 0,
+        "total_draft_tokens": 0,
+        "total_accepted_tokens": 0,
+        "draft_acceptance_rate": None,
+        "all_accept_round_rate": None,
+        "avg_accepted_len_per_round": None,
     }
 
 

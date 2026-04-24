@@ -332,15 +332,14 @@ def test_decode_one_local_executes_step_samples_and_commits_token() -> None:
     ]
 
 
-def test_generate_local_bootstraps_runs_decode_loop_and_closes_session(
+def test_generate_local_uses_empty_verify_rounds_and_closes_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model_runner = _runner()
     worker = FakeWorker(model_runner)
     scheduler = FakeScheduler()
-    inject_calls = []
     close_calls = []
-    decode_calls = []
+    verify_calls = []
     session = VerifierSession(
         req_id="req-1",
         prompt_token_ids=[1, 2, 3],
@@ -352,27 +351,11 @@ def test_generate_local_bootstraps_runs_decode_loop_and_closes_session(
         total_len=3,
     )
 
-    def inject_local_token(
-        local_session,
-        token_id,
-        runner,
-        *,
-        computed_delta,
-    ):
-        del runner
-        inject_calls.append((local_session, token_id, computed_delta))
-        local_session.token_ids.append(token_id)
-        local_session.total_len += 1
-        local_session.num_computed_tokens += computed_delta
-
-    bridge = SimpleNamespace(
-        inject_local_token=inject_local_token,
-    )
     engine = VerifierDecodeEngineV1(
         vllm_config=SimpleNamespace(),
         worker=worker,
         scheduler=scheduler,
-        state_bridge=bridge,
+        state_bridge=SimpleNamespace(),
         verifier_sampler=SimpleNamespace(),
     )
 
@@ -381,12 +364,22 @@ def test_generate_local_bootstraps_runs_decode_loop_and_closes_session(
         engine.sessions[req_id] = session
         return SimpleNamespace(req_id=req_id, bootstrap_token_id=21)
 
-    def fake_decode_one_local(local_session, input_token_id):
-        decode_calls.append((local_session, input_token_id))
-        return 22 if len(decode_calls) == 1 else 23
+    def fake_verify_round(local_session, request):
+        verify_calls.append((
+            local_session,
+            request.committed_token_id,
+            list(request.draft_token_ids),
+            list(request.draft_q_values),
+        ))
+        token_id = 22 if len(verify_calls) == 1 else 23
+        return VerifierRoundResult(
+            req_id=request.req_id,
+            accepted_len=0,
+            bonus_token_id=token_id,
+        )
 
     monkeypatch.setattr(engine, "open_session", fake_open_session)
-    monkeypatch.setattr(engine, "decode_one_local", fake_decode_one_local)
+    monkeypatch.setattr(engine, "verify_round", fake_verify_round)
     monkeypatch.setattr(
         engine,
         "close_session",
@@ -400,6 +393,8 @@ def test_generate_local_bootstraps_runs_decode_loop_and_closes_session(
     )
 
     assert output_token_ids == [21, 22, 23]
-    assert inject_calls == [(session, 21, 1)]
-    assert decode_calls == [(session, 21), (session, 22)]
+    assert verify_calls == [
+        (session, 21, [], []),
+        (session, 22, [], []),
+    ]
     assert close_calls == [session]
