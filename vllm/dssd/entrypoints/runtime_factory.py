@@ -153,6 +153,8 @@ def build_real_edge_service(args):
             state_bridge=state_bridge,
             draft_sampler=draft_sampler,
         )
+        tokenizer = _get_tokenizer(args, runtime.vllm_config)
+        eos_token_id = _resolve_edge_eos_token_id(args, tokenizer)
         return (
             DSSDEdgeService(
                 decode_engine=edge_engine,
@@ -161,8 +163,8 @@ def build_real_edge_service(args):
                     request_network=getattr(args, "request_network", None),
                     response_network=getattr(args, "response_network", None),
                 ),
-                tokenizer=_get_tokenizer(args, runtime.vllm_config),
-                eos_token_id=args.eos_token_id,
+                tokenizer=tokenizer,
+                eos_token_id=eos_token_id,
                 gamma=args.gamma,
             ),
             cleanup,
@@ -171,6 +173,19 @@ def build_real_edge_service(args):
         with contextlib.suppress(Exception):
             cleanup()
         raise
+
+
+def _resolve_edge_eos_token_id(args, tokenizer) -> int:
+    eos_token_id = getattr(args, "eos_token_id", None)
+    if eos_token_id is not None:
+        return int(eos_token_id)
+
+    tokenizer_eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if tokenizer_eos_token_id is None:
+        raise RuntimeError(
+            "could not infer eos_token_id from tokenizer; pass --eos-token-id"
+        )
+    return int(tokenizer_eos_token_id)
 
 
 def _init_real_runtime(

@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=6006)
     parser.add_argument("--ready-file")
     parser.add_argument("--verifier-url", required=True)
-    parser.add_argument("--eos-token-id", type=int, required=True)
+    parser.add_argument("--eos-token-id", type=int, default=None)
     parser.add_argument("--gamma", type=int, required=True)
     _add_runtime_args(parser)
     parser.add_argument(

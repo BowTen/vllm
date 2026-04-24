@@ -118,8 +118,6 @@ def test_edge_server_parser_defaults_to_real_service_factory(monkeypatch) -> Non
         [
             "--verifier-url",
             "http://127.0.0.1:8000",
-            "--eos-token-id",
-            "2",
             "--gamma",
             "2",
         ]
@@ -131,6 +129,7 @@ def test_edge_server_parser_defaults_to_real_service_factory(monkeypatch) -> Non
     )
     assert args.host == "127.0.0.1"
     assert args.port == 6006
+    assert args.eos_token_id is None
     assert args.model_runner_version == "v1"
 
 
@@ -609,6 +608,95 @@ def test_build_real_edge_service_passes_network_simulation_to_transport(
 
     assert service.verifier.request_network is request_network
     assert service.verifier.response_network is response_network
+
+
+def test_build_real_edge_service_infers_eos_token_id_from_tokenizer(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+    tokenizer = SimpleNamespace(eos_token_id=151645)
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, lambda: None),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda vllm_config: object(),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_get_tokenizer",
+        lambda args, vllm_config: tokenizer,
+    )
+
+    service, _returned_cleanup = runtime_factory.build_real_edge_service(
+        SimpleNamespace(
+            verifier_url="http://127.0.0.1:9000",
+            eos_token_id=None,
+            gamma=3,
+            model_runner_version="v2",
+        )
+    )
+
+    assert service.tokenizer is tokenizer
+    assert service.eos_token_id == 151645
+
+
+def test_build_real_edge_service_requires_eos_when_tokenizer_has_none(
+    monkeypatch,
+) -> None:
+    from vllm.dssd.entrypoints import runtime_factory
+
+    runtime = SimpleNamespace(
+        worker=SimpleNamespace(
+            model_runner=SimpleNamespace(
+                sampler=object(),
+            ),
+            shutdown=lambda: None,
+        ),
+        vllm_config=object(),
+        kv_cache_manager=None,
+    )
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_init_real_runtime",
+        lambda args, **kwargs: (runtime, lambda: None),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_make_request_block_hasher",
+        lambda vllm_config: object(),
+    )
+    monkeypatch.setattr(
+        runtime_factory,
+        "_get_tokenizer",
+        lambda args, vllm_config: SimpleNamespace(eos_token_id=None),
+    )
+
+    with pytest.raises(RuntimeError, match="could not infer eos_token_id"):
+        runtime_factory.build_real_edge_service(
+            SimpleNamespace(
+                verifier_url="http://127.0.0.1:9000",
+                eos_token_id=None,
+                gamma=3,
+                model_runner_version="v2",
+            )
+        )
 
 
 def test_build_real_edge_service_selects_v1_backend(monkeypatch) -> None:
