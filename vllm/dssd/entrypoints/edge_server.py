@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -146,6 +147,11 @@ def _build_server(
                 request_kwargs = _edge_complete_request_from_payload(payload)
                 if self.path == "/benchmark_complete":
                     request_kwargs["mode"] = payload.get("mode", "dssd")
+                    request_kwargs["network_simulation"] = (
+                        _network_simulation_from_payload(
+                            payload.get("network_simulation")
+                        )
+                    )
                     with execution_lock:
                         benchmark_response = _run_benchmark_complete(
                             edge_service=edge_service,
@@ -271,26 +277,30 @@ def _run_benchmark_complete(*, edge_service, request_kwargs: dict) -> dict:
     if mode not in {"dssd", "target_only"}:
         raise ValueError("benchmark mode must be one of {'dssd', 'target_only'}")
 
+    network_simulation = request_kwargs.pop("network_simulation", None)
     prompt_token_ids = list(tokenizer(request_kwargs["prompt"]).input_ids)
     inference_start = time.perf_counter()
-    if mode == "target_only":
-        verifier = getattr(edge_service, "verifier", None)
-        if verifier is None or not hasattr(verifier, "generate"):
-            raise RuntimeError("target-only mode requires edge_service.verifier.generate")
-        output_ids = verifier.generate(
-            req_id=request_kwargs["req_id"],
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=request_kwargs["sampling_params"],
-            lora_request=request_kwargs.get("lora_request"),
-        )
-        stats = None
-    else:
-        output_ids, stats = edge_service.generate_with_stats(
-            req_id=request_kwargs["req_id"],
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=request_kwargs["sampling_params"],
-            lora_request=request_kwargs.get("lora_request"),
-        )
+    with _temporary_verifier_networks(edge_service, network_simulation):
+        if mode == "target_only":
+            verifier = getattr(edge_service, "verifier", None)
+            if verifier is None or not hasattr(verifier, "generate"):
+                raise RuntimeError(
+                    "target-only mode requires edge_service.verifier.generate"
+                )
+            output_ids = verifier.generate(
+                req_id=request_kwargs["req_id"],
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=request_kwargs["sampling_params"],
+                lora_request=request_kwargs.get("lora_request"),
+            )
+            stats = None
+        else:
+            output_ids, stats = edge_service.generate_with_stats(
+                req_id=request_kwargs["req_id"],
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=request_kwargs["sampling_params"],
+                lora_request=request_kwargs.get("lora_request"),
+            )
     server_inference_seconds = time.perf_counter() - inference_start
     return {
         "req_id": request_kwargs["req_id"],
@@ -312,6 +322,84 @@ def _run_benchmark_complete(*, edge_service, request_kwargs: dict) -> dict:
             None if stats is None else stats.avg_accepted_len_per_round
         ),
     }
+
+
+def _network_simulation_from_payload(payload) -> SimpleNamespace | None:
+    if payload is None or payload == {}:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("network_simulation must be an object")
+
+    latency_ms = _optional_non_negative_float(
+        payload.get("latency_ms"),
+        field_name="network_simulation.latency_ms",
+    )
+    bandwidth_mbps = _optional_non_negative_float(
+        payload.get("bandwidth_mbps"),
+        field_name="network_simulation.bandwidth_mbps",
+    )
+    latency_ms = 0.0 if latency_ms is None else latency_ms
+    if latency_ms == 0.0 and (bandwidth_mbps is None or bandwidth_mbps == 0.0):
+        return None
+
+    bandwidth_bytes_per_s = (
+        None
+        if bandwidth_mbps is None or bandwidth_mbps == 0.0
+        else bandwidth_mbps * 1_000_000.0 / 8.0
+    )
+    return SimpleNamespace(
+        fixed_latency_ms=latency_ms,
+        bandwidth_bytes_per_s=bandwidth_bytes_per_s,
+    )
+
+
+def _optional_non_negative_float(value, *, field_name: str) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return parsed
+
+
+@contextlib.contextmanager
+def _temporary_verifier_networks(edge_service, network_simulation):
+    if network_simulation is None:
+        yield
+        return
+
+    verifier = getattr(edge_service, "verifier", None)
+    if verifier is None:
+        raise RuntimeError("network simulation requires edge_service.verifier")
+    if not hasattr(verifier, "request_network") or not hasattr(
+        verifier, "response_network"
+    ):
+        raise RuntimeError(
+            "network simulation requires verifier request/response network hooks"
+        )
+
+    from vllm.dssd.transport import FakeNetwork
+
+    original_request_network = verifier.request_network
+    original_response_network = verifier.response_network
+    verifier.request_network = FakeNetwork(
+        fixed_latency_ms=network_simulation.fixed_latency_ms,
+        bandwidth_bytes_per_s=network_simulation.bandwidth_bytes_per_s,
+        warning_label="edge-to-verifier request",
+    )
+    verifier.response_network = FakeNetwork(
+        fixed_latency_ms=network_simulation.fixed_latency_ms,
+        bandwidth_bytes_per_s=network_simulation.bandwidth_bytes_per_s,
+        warning_label="verifier-to-edge response",
+    )
+    try:
+        yield
+    finally:
+        verifier.request_network = original_request_network
+        verifier.response_network = original_response_network
 
 
 def _should_decode_raw_sampling_params(service_factory: str) -> bool:

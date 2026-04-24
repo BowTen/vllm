@@ -346,6 +346,11 @@ def test_edge_server_root_serves_benchmark_page(monkeypatch) -> None:
     assert "服务端 token / s" in body
     assert "采样温度" in body
     assert "temperature: temperature" in body
+    assert "网络延迟 ms" in body
+    assert "带宽 Mbps" in body
+    assert "network_simulation" in body
+    assert "latency_ms: networkLatencyMs" in body
+    assert "bandwidth_mbps: networkBandwidthMbps" in body
 
 
 def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
@@ -415,6 +420,110 @@ def test_edge_server_benchmark_complete_handler_round_trip(monkeypatch) -> None:
         "draft_acceptance_rate": 0.75,
         "all_accept_round_rate": 0.5,
         "avg_accepted_len_per_round": 1.5,
+    }
+
+
+def test_edge_server_benchmark_complete_applies_temporary_network_simulation(
+    monkeypatch,
+) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+
+    class FakeTokenizer:
+        def __call__(self, text):
+            assert text == "hello world"
+            return SimpleNamespace(input_ids=[11, 12])
+
+        def decode(self, output_ids, skip_special_tokens=True):
+            assert skip_special_tokens is True
+            assert output_ids == [7, 8, 9]
+            return "decoded output"
+
+    original_request_network = object()
+    original_response_network = object()
+    fake_verifier = SimpleNamespace(
+        request_network=original_request_network,
+        response_network=original_response_network,
+    )
+
+    def generate_with_stats(**kwargs):
+        _assert_benchmark_kwargs(kwargs)
+        assert fake_verifier.request_network is not original_request_network
+        assert fake_verifier.response_network is not original_response_network
+        assert fake_verifier.request_network.fixed_latency_ms == 25.0
+        assert fake_verifier.response_network.fixed_latency_ms == 25.0
+        assert fake_verifier.request_network.bandwidth_bytes_per_s == 12_500_000
+        assert fake_verifier.response_network.bandwidth_bytes_per_s == 12_500_000
+        return [7, 8, 9], _make_fake_generation_stats(
+            total_rounds=2,
+            total_draft_tokens=4,
+            total_accepted_tokens=3,
+            all_accept_rounds=1,
+        )
+
+    edge_service = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        verifier=fake_verifier,
+        generate_with_stats=generate_with_stats,
+    )
+    server, thread = _start_edge_server(edge_server, edge_service=edge_service)
+
+    try:
+        response = _post_json(
+            server,
+            "/benchmark_complete",
+            {
+                "req_id": "req-bench",
+                "mode": "dssd",
+                "prompt": "hello world",
+                "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                "network_simulation": {
+                    "latency_ms": 25,
+                    "bandwidth_mbps": 100,
+                },
+                "lora_request": None,
+            },
+        )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert response["text"] == "decoded output"
+    assert fake_verifier.request_network is original_request_network
+    assert fake_verifier.response_network is original_response_network
+
+
+def test_edge_server_benchmark_complete_rejects_invalid_network_simulation(
+    monkeypatch,
+) -> None:
+    edge_server = _load_edge_server_module()
+    _install_edge_server_http_shims(edge_server, monkeypatch)
+
+    server, thread = _start_edge_server(
+        edge_server,
+        edge_service=SimpleNamespace(),
+    )
+
+    try:
+        with pytest.raises(error.HTTPError) as exc_info:
+            _post_json(
+                server,
+                "/benchmark_complete",
+                {
+                    "req_id": "req-bench",
+                    "mode": "dssd",
+                    "prompt": "hello world",
+                    "sampling_params": {"max_tokens": 4, "temperature": 0.0},
+                    "network_simulation": [],
+                    "lora_request": None,
+                },
+            )
+    finally:
+        _stop_edge_server(server, thread)
+
+    assert exc_info.value.code == 500
+    assert json.loads(exc_info.value.read().decode("utf-8")) == {
+        "error": "network_simulation must be an object",
+        "error_type": "ValueError",
     }
 
 

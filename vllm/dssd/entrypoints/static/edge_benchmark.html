@@ -251,6 +251,16 @@
             <input id="temperature" type="number" min="0" step="0.1" value="0.0">
           </div>
 
+          <div class="number-group">
+            <label for="networkLatency">网络延迟 ms</label>
+            <input id="networkLatency" type="number" min="0" step="1" value="0">
+          </div>
+
+          <div class="number-group">
+            <label for="networkBandwidth">带宽 Mbps</label>
+            <input id="networkBandwidth" type="number" min="0" step="1" value="0">
+          </div>
+
           <label class="toggle" for="includePrompt">
             <input id="includePrompt" type="checkbox">
             token/s 计入 prompt token
@@ -340,6 +350,8 @@
     const promptEl = document.getElementById("prompt");
     const maxTokensEl = document.getElementById("maxTokens");
     const temperatureEl = document.getElementById("temperature");
+    const networkLatencyEl = document.getElementById("networkLatency");
+    const networkBandwidthEl = document.getElementById("networkBandwidth");
     const includePromptEl = document.getElementById("includePrompt");
     const modeSelectEl = document.getElementById("modeSelect");
     const runButtonEl = document.getElementById("runButton");
@@ -363,6 +375,20 @@
     function setStatus(message, isError = false) {
       statusEl.textContent = message;
       statusEl.classList.toggle("error", isError);
+    }
+
+    function parseOptionalNetworkNumber(inputEl, label) {
+      const rawValue = inputEl.value.trim();
+      if (!rawValue) {
+        return null;
+      }
+      const value = Number.parseFloat(rawValue);
+      if (!Number.isFinite(value) || value < 0) {
+        setStatus(`${label} 必须是非负数。`, true);
+        inputEl.focus();
+        return undefined;
+      }
+      return value;
     }
 
     function renderMetrics() {
@@ -425,6 +451,20 @@
       const prompt = promptEl.value;
       const maxTokens = Number.parseInt(maxTokensEl.value, 10);
       const temperature = Number.parseFloat(temperatureEl.value);
+      const networkLatencyMs = parseOptionalNetworkNumber(
+        networkLatencyEl,
+        "网络延迟"
+      );
+      if (networkLatencyMs === undefined) {
+        return;
+      }
+      const networkBandwidthMbps = parseOptionalNetworkNumber(
+        networkBandwidthEl,
+        "带宽"
+      );
+      if (networkBandwidthMbps === undefined) {
+        return;
+      }
       const selectedMode = modeSelectEl.value;
       if (!prompt.trim()) {
         setStatus("请输入文本。", true);
@@ -460,6 +500,10 @@
             sampling_params: {
               max_tokens: maxTokens,
               temperature: temperature
+            },
+            network_simulation: {
+              latency_ms: networkLatencyMs,
+              bandwidth_mbps: networkBandwidthMbps
             },
             lora_request: null
           })
