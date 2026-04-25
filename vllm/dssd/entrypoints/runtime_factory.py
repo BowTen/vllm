@@ -245,6 +245,9 @@ def _init_real_runtime(
                     kv_cache_config=scheduler_kv_cache_config,
                     max_model_len=vllm_config.model_config.max_model_len,
                     hash_block_size=vllm_config.cache_config.block_size,
+                    enable_caching=(
+                        vllm_config.cache_config.enable_prefix_caching
+                    ),
                 ),
             )
     except Exception:

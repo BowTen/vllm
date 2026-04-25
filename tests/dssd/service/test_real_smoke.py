@@ -707,40 +707,44 @@ def _decode_via_transport_target_only(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
     )
-    edge_session = _make_edge_shadow_session(
+    edge_session = edge_engine.open_session(
         req_id=req_id,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
     )
     token_ids = [
-        edge_engine.commit_external_token(
+        edge_engine.prefill(
             edge_session,
-            opened.bootstrap_token_id,
+            bootstrap_token_id=opened.bootstrap_token_id,
         )
     ]
 
-    while len(token_ids) < output_tokens:
-        round_state = edge_engine.draft(
-            edge_session,
-            first_token_id=token_ids[-1],
-            gamma=0,
-        )
-        response = transport.verify_round(
-            VerifyRoundRequest(
-                req_id=req_id,
-                committed_token_id=token_ids[-1],
-                draft_token_ids=list(round_state.draft_token_ids),
-                draft_q_values=list(round_state.draft_q_values),
-            )
-        )
-        assert response.accepted_len == 0
-        assert response.bonus_token_id is not None
-        token_ids.append(
-            edge_engine.commit_external_token(
+    try:
+        while len(token_ids) < output_tokens:
+            round_state = edge_engine.draft(
                 edge_session,
-                response.bonus_token_id,
+                first_token_id=token_ids[-1],
+                gamma=0,
             )
-        )
+            response = transport.verify_round(
+                VerifyRoundRequest(
+                    req_id=req_id,
+                    committed_token_id=token_ids[-1],
+                    draft_token_ids=list(round_state.draft_token_ids),
+                    draft_q_values=list(round_state.draft_q_values),
+                )
+            )
+            assert response.accepted_len == 0
+            assert response.bonus_token_id is not None
+            token_ids.append(
+                edge_engine.commit_external_token(
+                    edge_session,
+                    response.bonus_token_id,
+                )
+            )
+    finally:
+        if req_id in edge_engine.sessions:
+            edge_engine.close_session(edge_session)
 
     return token_ids, edge_session
 
@@ -783,7 +787,8 @@ def test_real_service_transport_target_only_matches_direct_verifier(
     real_dssd_runtime,
 ) -> None:
     edge_engine, verifier_engine, transport = _build_real_components(
-        real_dssd_runtime
+        real_dssd_runtime,
+        remote_req_id_factory=lambda req_id: f"{req_id}::verifier",
     )
     sampling_params = SamplingParams(
         temperature=0.0,

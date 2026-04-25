@@ -49,6 +49,8 @@ def _build_runner() -> SimpleNamespace:
             num_computed_tokens_cpu=np.array([3], dtype=np.int32),
             req_output_token_ids=req_output_token_ids,
             spec_token_ids=[[]],
+            prev_sampled_token_ids=None,
+            prev_req_id_to_index=None,
         ),
     )
 
@@ -91,6 +93,25 @@ def test_begin_round_adds_committed_token_without_advancing_computed_len() -> No
     assert int(runner.input_batch.num_tokens_no_spec[0]) == 4
     assert int(runner.input_batch.num_computed_tokens_cpu[0]) == 3
     assert runner.input_batch.token_ids_cpu[0, 3] == 9
+
+
+def test_begin_round_clears_cached_sampled_tokens() -> None:
+    session = _build_session()
+    runner = _build_runner()
+    runner.input_batch.prev_sampled_token_ids = torch.tensor([[99]])
+    runner.input_batch.prev_req_id_to_index = {"req-1": 0}
+    bridge = VerifierStateBridgeV1()
+    request = VerifierRoundRequest(
+        req_id="req-1",
+        committed_token_id=9,
+        draft_token_ids=[11],
+        draft_q_values=[0.2],
+    )
+
+    bridge.begin_round(session, request, runner, gamma=4)
+
+    assert runner.input_batch.prev_sampled_token_ids is None
+    assert runner.input_batch.prev_req_id_to_index is None
 
 
 def test_finish_round_only_appends_accepted_draft_prefix() -> None:

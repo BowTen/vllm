@@ -15,12 +15,15 @@ from vllm.sampling_params import SamplingParams
 
 
 class FakeWorker:
-    def __init__(self, model_runner) -> None:
+    def __init__(self, model_runner, execute_states=None) -> None:
         self.model_runner = model_runner
+        self.execute_states = list(execute_states or [])
         self.execute_calls = []
 
     def execute_model(self, scheduler_output):
         self.execute_calls.append(scheduler_output)
+        if self.execute_states:
+            self.model_runner.execute_model_state = self.execute_states.pop(0)
         return None
 
 
@@ -41,8 +44,12 @@ class FakeScheduler:
         self.open_calls.append(session.req_id)
         return ("open", session.req_id)
 
-    def build_verify_step(self, session, request):
-        self.verify_calls.append((session.req_id, list(request.draft_token_ids)))
+    def build_verify_step(self, session, request, *, use_spec_decode=True):
+        self.verify_calls.append((
+            session.req_id,
+            list(request.draft_token_ids),
+            use_spec_decode,
+        ))
         return ("verify", session.req_id, len(request.draft_token_ids) + 1)
 
     def build_decode_step(self, session):
@@ -109,7 +116,7 @@ def _session() -> VerifierSession:
     return VerifierSession(
         req_id="req-1",
         prompt_token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(),
+        sampling_params=SamplingParams(temperature=0.0),
         block_ids=([7, 8],),
         prompt_len=3,
         token_ids=[1, 2, 3],
@@ -155,24 +162,29 @@ def test_open_session_samples_bootstrap_without_committing_it() -> None:
     assert model_runner.execute_model_state is None
 
 
-def test_verify_round_runs_single_forward_and_only_commits_accepted_prefix(
+def test_verify_round_checks_drafts_with_sequential_target_only_steps(
 ) -> None:
     model_runner = _runner_with_request_state()
-    model_runner.execute_model_state = SimpleNamespace(
-        logits="logits",
-        spec_decode_metadata="metadata",
+    execute_state = SimpleNamespace(
+        logits=torch.zeros((1, 5)),
+        spec_decode_metadata=None,
     )
-    worker = FakeWorker(model_runner)
+    worker = FakeWorker(
+        model_runner,
+        execute_states=[execute_state, execute_state],
+    )
     scheduler = FakeScheduler()
-    round_result = VerifierRoundResult(
-        req_id="req-1",
-        accepted_len=1,
-        bonus_token_id=None,
-        rejected_target_logits=torch.tensor([0.1, 0.2, 0.3]),
-    )
-    sampler = SimpleNamespace(
-        verify_round=lambda **_kwargs: round_result,
-    )
+    sampler_results = [
+        VerifierRoundResult(req_id="req-1", accepted_len=0, bonus_token_id=11),
+        VerifierRoundResult(req_id="req-1", accepted_len=0, bonus_token_id=99),
+    ]
+    sampler_calls = []
+
+    def verify_round(**kwargs):
+        sampler_calls.append(kwargs)
+        return sampler_results.pop(0)
+
+    sampler = SimpleNamespace(verify_round=verify_round)
     begin_calls = []
     bridge = VerifierStateBridgeV1()
     original_begin_round = bridge.begin_round
@@ -202,9 +214,24 @@ def test_verify_round_runs_single_forward_and_only_commits_accepted_prefix(
         request,
     )
 
-    assert result is round_result
-    assert begin_calls == [("req-1", 9, 2)]
-    assert worker.execute_calls == [("verify", "req-1", 3)]
+    assert result == VerifierRoundResult(
+        req_id="req-1",
+        accepted_len=1,
+        rejected_token_id=99,
+    )
+    assert begin_calls == [("req-1", 9, 2), ("req-1", 11, 2)]
+    assert worker.execute_calls == [
+        ("verify", "req-1", 1),
+        ("verify", "req-1", 1),
+    ]
+    assert scheduler.verify_calls == [
+        ("req-1", [], False),
+        ("req-1", [], False),
+    ]
+    assert [call["request"].committed_token_id for call in sampler_calls] == [
+        9,
+        11,
+    ]
     assert session.token_ids == [1, 2, 3, 9, 11]
     assert session.total_len == 5
     assert session.num_computed_tokens == 5
@@ -218,7 +245,7 @@ def test_verify_round_runs_single_forward_and_only_commits_accepted_prefix(
         9,
         11,
     ]
-    assert model_runner.take_execute_model_state_calls == 1
+    assert model_runner.take_execute_model_state_calls == 2
     assert model_runner.execute_model_state is None
 
 
@@ -252,7 +279,8 @@ def test_verify_round_rolls_back_round_state_when_sampler_raises() -> None:
     with pytest.raises(RuntimeError, match="sampler boom"):
         engine.verify_round(session, request)
 
-    assert worker.execute_calls == [("verify", "req-1", 3)]
+    assert worker.execute_calls == [("verify", "req-1", 1)]
+    assert scheduler.verify_calls == [("req-1", [], False)]
     assert session.token_ids == [1, 2, 3]
     assert session.total_len == 3
     assert session.num_computed_tokens == 3
@@ -276,6 +304,35 @@ def test_verify_round_rolls_back_round_state_when_sampler_raises() -> None:
     ]
     assert model_runner.take_execute_model_state_calls == 1
     assert model_runner.execute_model_state is None
+    assert "req-1" not in bridge._round_states
+
+
+def test_verify_round_rejects_non_greedy_external_draft() -> None:
+    model_runner = _runner_with_request_state()
+    worker = FakeWorker(model_runner)
+    scheduler = FakeScheduler()
+    bridge = VerifierStateBridgeV1()
+    engine = VerifierDecodeEngineV1(
+        vllm_config=SimpleNamespace(),
+        worker=worker,
+        scheduler=scheduler,
+        state_bridge=bridge,
+        verifier_sampler=SimpleNamespace(),
+    )
+    session = _session()
+    session.sampling_params = SamplingParams(temperature=1.0)
+    request = VerifierRoundRequest(
+        req_id="req-1",
+        committed_token_id=9,
+        draft_token_ids=[11],
+        draft_q_values=[0.2],
+    )
+
+    with pytest.raises(ValueError, match="requires greedy"):
+        engine.verify_round(session, request)
+
+    assert worker.execute_calls == []
+    assert session.token_ids == [1, 2, 3]
     assert "req-1" not in bridge._round_states
 
 

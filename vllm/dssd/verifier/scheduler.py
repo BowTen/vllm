@@ -88,6 +88,8 @@ class VerifierSchedulerAdapter:
         self,
         session: VerifierSession,
         request: VerifierRoundRequest,
+        *,
+        use_spec_decode: bool = True,
     ) -> SchedulerOutput:
         self._validate_req_id(session.req_id, request.req_id)
         query_len = 1 + len(request.draft_token_ids)
@@ -105,7 +107,7 @@ class VerifierSchedulerAdapter:
             new_block_ids_to_zero = self._drain_new_block_ids_to_zero(blocks)
         scheduled_spec_decode_tokens = (
             {session.req_id: list(request.draft_token_ids)}
-            if request.draft_token_ids
+            if use_spec_decode and request.draft_token_ids
             else {}
         )
         return SchedulerOutput(

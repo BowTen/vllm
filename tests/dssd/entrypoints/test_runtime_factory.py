@@ -1012,7 +1012,10 @@ def test_init_real_runtime_warms_up_worker_after_kv_cache_init(monkeypatch) -> N
             events.append("shutdown")
 
     fake_vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=16),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=False,
+        ),
         model_config=SimpleNamespace(max_model_len=128),
     )
 
@@ -1055,6 +1058,7 @@ def test_init_real_runtime_warms_up_worker_after_kv_cache_init(monkeypatch) -> N
 
     try:
         assert runtime.worker is not None
+        assert runtime.kv_cache_manager.enable_caching is False
         assert events == [
             "init_device",
             "load_model",

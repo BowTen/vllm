@@ -13,6 +13,8 @@ from .types import (
     VerifierSession,
 )
 
+_GREEDY_TEMPERATURE_EPS = 1e-5
+
 
 class VerifierDecodeEngineV1:
     def __init__(
@@ -146,27 +148,9 @@ class VerifierDecodeEngineV1:
     ) -> VerifierRoundResult:
         snapshot = self._snapshot_round_state(session)
         try:
-            self.state_bridge.begin_round(
-                session,
-                request,
-                self.model_runner,
-                gamma=self.gamma,
-            )
-            self._execute(self.scheduler.build_verify_step(session, request))
-            state = self.model_runner.take_execute_model_state()
-            result = self.verifier_sampler.verify_round(
-                logits=state.logits,
-                spec_decode_metadata=state.spec_decode_metadata,
-                sampling_metadata=self.model_runner.input_batch.sampling_metadata,
-                request=request,
-            )
-            self.state_bridge.finish_round(
-                session,
-                request,
-                result,
-                self.model_runner,
-            )
-            return result
+            if request.draft_token_ids:
+                return self._verify_round_sequential(session, request)
+            return self._verify_round_once(session, request)
         except Exception:
             self._rollback_round_state(session, snapshot)
             raise
@@ -229,6 +213,96 @@ class VerifierDecodeEngineV1:
             "num_computed_tokens_cpu":
             input_batch.num_computed_tokens_cpu[req_idx].copy(),
         }
+
+    def _verify_round_sequential(
+        self,
+        session: VerifierSession,
+        request: VerifierRoundRequest,
+    ) -> VerifierRoundResult:
+        request.validate(gamma=self.gamma)
+        if not self._is_greedy_sampling_params(session.sampling_params):
+            raise ValueError(
+                "V1 external-draft sequential verification requires greedy "
+                "sampling parameters"
+            )
+
+        accepted_len = 0
+        committed_token_id = request.committed_token_id
+        for draft_token_id in request.draft_token_ids:
+            step_result = self._verify_round_once(
+                session,
+                VerifierRoundRequest(
+                    req_id=request.req_id,
+                    committed_token_id=committed_token_id,
+                    draft_token_ids=[],
+                    draft_q_values=[],
+                ),
+            )
+            if step_result.bonus_token_id is None:
+                raise RuntimeError("empty verifier step requires bonus_token_id")
+            target_token_id = int(step_result.bonus_token_id)
+            if target_token_id != int(draft_token_id):
+                return VerifierRoundResult(
+                    req_id=request.req_id,
+                    accepted_len=accepted_len,
+                    rejected_token_id=target_token_id,
+                )
+            accepted_len += 1
+            committed_token_id = int(draft_token_id)
+
+        bonus_result = self._verify_round_once(
+            session,
+            VerifierRoundRequest(
+                req_id=request.req_id,
+                committed_token_id=committed_token_id,
+                draft_token_ids=[],
+                draft_q_values=[],
+            ),
+        )
+        if bonus_result.bonus_token_id is None:
+            raise RuntimeError("empty verifier step requires bonus_token_id")
+        return VerifierRoundResult(
+            req_id=request.req_id,
+            accepted_len=accepted_len,
+            bonus_token_id=int(bonus_result.bonus_token_id),
+        )
+
+    @staticmethod
+    def _is_greedy_sampling_params(sampling_params: SamplingParams) -> bool:
+        temperature = getattr(sampling_params, "temperature", None)
+        return temperature is not None and float(temperature) < _GREEDY_TEMPERATURE_EPS
+
+    def _verify_round_once(
+        self,
+        session: VerifierSession,
+        request: VerifierRoundRequest,
+    ) -> VerifierRoundResult:
+        self.state_bridge.begin_round(
+            session,
+            request,
+            self.model_runner,
+            gamma=self.gamma,
+        )
+        scheduler_output = self.scheduler.build_verify_step(
+            session,
+            request,
+            use_spec_decode=False,
+        )
+        self._execute(scheduler_output)
+        state = self.model_runner.take_execute_model_state()
+        result = self.verifier_sampler.verify_round(
+            logits=state.logits,
+            spec_decode_metadata=state.spec_decode_metadata,
+            sampling_metadata=self.model_runner.input_batch.sampling_metadata,
+            request=request,
+        )
+        self.state_bridge.finish_round(
+            session,
+            request,
+            result,
+            self.model_runner,
+        )
+        return result
 
     def _rollback_round_state(
         self,
