@@ -1,0 +1,75 @@
+{
+  "config": {
+    "model": "/root/autodl-tmp/opt-6.7b",
+    "edge_model": "/root/autodl-tmp/opt-125m",
+    "verifier_model": "/root/autodl-tmp/opt-6.7b",
+    "edge_model_runner": "v1",
+    "verifier_model_runner": "v1",
+    "edge_cuda_visible_devices": "0",
+    "verifier_cuda_visible_devices": "1",
+    "verifier_host": "127.0.0.1",
+    "verifier_port": 18121,
+    "prompt_len": 32,
+    "decode_tokens": 8,
+    "warmup_tokens": 0,
+    "repeats": 1,
+    "gamma": 1,
+    "gpu_memory_utilization": 0.9,
+    "max_model_len": 96,
+    "kv_cache_memory_bytes": null,
+    "max_num_batched_tokens": 64,
+    "max_num_seqs": 2,
+    "enforce_eager": true,
+    "async_scheduling": false,
+    "warmup_repeats": 0,
+    "prompt_jsonl": "benchmarks/dssd/prompts/high_acceptance_opt.jsonl",
+    "request_latency_ms": 0.0,
+    "request_bandwidth_bytes_per_s": null,
+    "response_latency_ms": 0.0,
+    "response_bandwidth_bytes_per_s": null,
+    "network_calibration": null
+  },
+  "tokenizer": "/root/autodl-tmp/opt-125m",
+  "prompt_count": 1,
+  "summary": {
+    "total_prompts": 1,
+    "matched_prompts": 1,
+    "output_consistency_rate": 1.0,
+    "mean_draft_acceptance_rate": 0.6,
+    "mean_all_accept_round_rate": 0.6,
+    "mean_avg_accepted_len_per_round": 0.6
+  },
+  "results": [
+    {
+      "prompt_index": 0,
+      "prompt_tokens": 32,
+      "output_len": 8,
+      "gamma": 1,
+      "matched": true,
+      "first_mismatch_index": null,
+      "target_token_ids": [
+        881,
+        621,
+        6,
+        53,
+        31,
+        10,
+        333,
+        9
+      ],
+      "dssd_token_ids": [
+        881,
+        621,
+        6,
+        53,
+        31,
+        10,
+        333,
+        9
+      ],
+      "draft_acceptance_rate": 0.6,
+      "all_accept_round_rate": 0.6,
+      "avg_accepted_len_per_round": 0.6
+    }
+  ]
+}
