@@ -99,18 +99,6 @@ class VerifierStateBridgeV1:
         )
         if hasattr(model_runner.input_batch, "is_token_ids"):
             model_runner.input_batch.is_token_ids[req_idx, write_pos] = True
-        if request.draft_token_ids:
-            draft_start = write_pos + 1
-            draft_end = draft_start + len(request.draft_token_ids)
-            model_runner.input_batch.token_ids_cpu[
-                req_idx,
-                draft_start:draft_end,
-            ] = request.draft_token_ids
-            if hasattr(model_runner.input_batch, "is_token_ids"):
-                model_runner.input_batch.is_token_ids[
-                    req_idx,
-                    draft_start:draft_end,
-                ] = True
         model_runner.input_batch.num_tokens_no_spec[req_idx] = write_pos + 1
         if hasattr(model_runner.input_batch, "prev_sampled_token_ids"):
             model_runner.input_batch.prev_sampled_token_ids = None

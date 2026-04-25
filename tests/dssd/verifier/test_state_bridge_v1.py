@@ -95,6 +95,23 @@ def test_begin_round_adds_committed_token_without_advancing_computed_len() -> No
     assert runner.input_batch.token_ids_cpu[0, 3] == 9
 
 
+def test_begin_round_leaves_draft_tokens_to_spec_metadata() -> None:
+    session = _build_session()
+    runner = _build_runner()
+    bridge = VerifierStateBridgeV1()
+    request = VerifierRoundRequest(
+        req_id="req-1",
+        committed_token_id=9,
+        draft_token_ids=[11, 12],
+        draft_q_values=[0.2, 0.3],
+    )
+
+    bridge.begin_round(session, request, runner, gamma=4)
+
+    assert runner.input_batch.token_ids_cpu[0, 4:6].tolist() == [0, 0]
+    assert runner.input_batch.is_token_ids[0, 4:6].tolist() == [False, False]
+
+
 def test_begin_round_clears_cached_sampled_tokens() -> None:
     session = _build_session()
     runner = _build_runner()

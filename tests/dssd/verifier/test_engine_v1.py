@@ -162,27 +162,23 @@ def test_open_session_samples_bootstrap_without_committing_it() -> None:
     assert model_runner.execute_model_state is None
 
 
-def test_verify_round_checks_drafts_with_sequential_target_only_steps(
-) -> None:
+def test_verify_round_uses_packed_verify_step_for_drafts() -> None:
     model_runner = _runner_with_request_state()
     execute_state = SimpleNamespace(
         logits=torch.zeros((1, 5)),
         spec_decode_metadata=None,
     )
-    worker = FakeWorker(
-        model_runner,
-        execute_states=[execute_state, execute_state],
-    )
+    worker = FakeWorker(model_runner, execute_states=[execute_state])
     scheduler = FakeScheduler()
-    sampler_results = [
-        VerifierRoundResult(req_id="req-1", accepted_len=0, bonus_token_id=11),
-        VerifierRoundResult(req_id="req-1", accepted_len=0, bonus_token_id=99),
-    ]
     sampler_calls = []
 
     def verify_round(**kwargs):
         sampler_calls.append(kwargs)
-        return sampler_results.pop(0)
+        return VerifierRoundResult(
+            req_id="req-1",
+            accepted_len=1,
+            rejected_token_id=99,
+        )
 
     sampler = SimpleNamespace(verify_round=verify_round)
     begin_calls = []
@@ -219,18 +215,12 @@ def test_verify_round_checks_drafts_with_sequential_target_only_steps(
         accepted_len=1,
         rejected_token_id=99,
     )
-    assert begin_calls == [("req-1", 9, 2), ("req-1", 11, 2)]
-    assert worker.execute_calls == [
-        ("verify", "req-1", 1),
-        ("verify", "req-1", 1),
-    ]
-    assert scheduler.verify_calls == [
-        ("req-1", [], False),
-        ("req-1", [], False),
-    ]
-    assert [call["request"].committed_token_id for call in sampler_calls] == [
-        9,
-        11,
+    assert begin_calls == [("req-1", 9, 2)]
+    assert worker.execute_calls == [("verify", "req-1", 3)]
+    assert scheduler.verify_calls == [("req-1", [11, 12], True)]
+    assert [call["request"].committed_token_id for call in sampler_calls] == [9]
+    assert [list(call["request"].draft_token_ids) for call in sampler_calls] == [
+        [11, 12],
     ]
     assert session.token_ids == [1, 2, 3, 9, 11]
     assert session.total_len == 5
@@ -245,7 +235,7 @@ def test_verify_round_checks_drafts_with_sequential_target_only_steps(
         9,
         11,
     ]
-    assert model_runner.take_execute_model_state_calls == 2
+    assert model_runner.take_execute_model_state_calls == 1
     assert model_runner.execute_model_state is None
 
 
@@ -279,8 +269,8 @@ def test_verify_round_rolls_back_round_state_when_sampler_raises() -> None:
     with pytest.raises(RuntimeError, match="sampler boom"):
         engine.verify_round(session, request)
 
-    assert worker.execute_calls == [("verify", "req-1", 1)]
-    assert scheduler.verify_calls == [("req-1", [], False)]
+    assert worker.execute_calls == [("verify", "req-1", 3)]
+    assert scheduler.verify_calls == [("req-1", [11, 12], True)]
     assert session.token_ids == [1, 2, 3]
     assert session.total_len == 3
     assert session.num_computed_tokens == 3
@@ -307,17 +297,31 @@ def test_verify_round_rolls_back_round_state_when_sampler_raises() -> None:
     assert "req-1" not in bridge._round_states
 
 
-def test_verify_round_rejects_non_greedy_external_draft() -> None:
+def test_verify_round_allows_non_greedy_external_draft_on_packed_path() -> None:
     model_runner = _runner_with_request_state()
+    model_runner.execute_model_state = SimpleNamespace(
+        logits="logits",
+        spec_decode_metadata="metadata",
+    )
     worker = FakeWorker(model_runner)
     scheduler = FakeScheduler()
     bridge = VerifierStateBridgeV1()
+    sampler_calls = []
+
+    def verify_round(**kwargs):
+        sampler_calls.append(kwargs)
+        return VerifierRoundResult(
+            req_id="req-1",
+            accepted_len=0,
+            rejected_token_id=99,
+        )
+
     engine = VerifierDecodeEngineV1(
         vllm_config=SimpleNamespace(),
         worker=worker,
         scheduler=scheduler,
         state_bridge=bridge,
-        verifier_sampler=SimpleNamespace(),
+        verifier_sampler=SimpleNamespace(verify_round=verify_round),
     )
     session = _session()
     session.sampling_params = SamplingParams(temperature=1.0)
@@ -328,12 +332,19 @@ def test_verify_round_rejects_non_greedy_external_draft() -> None:
         draft_q_values=[0.2],
     )
 
-    with pytest.raises(ValueError, match="requires greedy"):
-        engine.verify_round(session, request)
+    result = engine.verify_round(session, request)
 
-    assert worker.execute_calls == []
-    assert session.token_ids == [1, 2, 3]
-    assert "req-1" not in bridge._round_states
+    assert result == VerifierRoundResult(
+        req_id="req-1",
+        accepted_len=0,
+        rejected_token_id=99,
+    )
+    assert worker.execute_calls == [("verify", "req-1", 2)]
+    assert scheduler.verify_calls == [("req-1", [11], True)]
+    assert len(sampler_calls) == 1
+    assert session.token_ids == [1, 2, 3, 9]
+    assert bridge._round_states["req-1"].committed_token_id is None
+    assert bridge._round_states["req-1"].draft_token_ids == []
 
 
 def test_decode_one_local_executes_step_samples_and_commits_token() -> None:
