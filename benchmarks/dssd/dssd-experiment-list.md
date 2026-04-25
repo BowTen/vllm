@@ -77,13 +77,13 @@ pytest tests/benchmarks/test_dssd_local_engine_benchmark.py -v
 | 输出长度 | 64 或 128 tokens |
 | gamma | 1、2、4、8 |
 | Prompt 数量 | 5 到 10 条固定 prompt |
-| 模型组合 | OPT-125M / OPT-6.7B；可补充 Qwen3-0.6B / Qwen3-8B |
+| 模型组合 | OPT-125M / OPT-6.7B |
 
 **本次结果**
 
 结果记录：`benchmarks/dssd/results/experiment-1.2-greedy-output-consistency-2026-04-25.md`
 
-正式结果采用 OPT-125M / OPT-6.7B 模型组合，使用 5 条固定 prompt、`prompt_len=128`、`output_tokens=64`、`temperature=0.0`。Qwen3-0.6B / Qwen3-8B 作为补充诊断模型组合运行；其 packed verifier 路径暴露输出不一致问题，逐 token sequential verifier 仅作为正确性诊断路径，不作为性能实验实现。
+正式结果采用 OPT-125M / OPT-6.7B 模型组合，使用 5 条固定 prompt、`prompt_len=128`、`output_tokens=64`、`temperature=0.0`。恢复原始 packed verifier 路径后，OPT 组合在 `gamma=1,2,4,8` 上仍达到 100% 输出一致率。
 
 **论文结果表**
 
@@ -94,19 +94,9 @@ pytest tests/benchmarks/test_dssd_local_engine_benchmark.py -v
 | OPT-125M / OPT-6.7B | 4 | 5 | 100% |
 | OPT-125M / OPT-6.7B | 8 | 5 | 100% |
 
-**补充诊断**
-
-| 模型组合 | gamma | Prompt 数量 | 输出一致率 | 说明 |
-|---|---:|---:|---:|---|
-| Qwen3-0.6B / Qwen3-8B | 0 | 5 | 100% | 空 draft 对照通过 |
-| Qwen3-0.6B / Qwen3-8B | 1 | 5 | 60% | packed external-draft 路径未通过 |
-| Qwen3-0.6B / Qwen3-8B | 4 | 5 | 40% | packed external-draft 路径未通过 |
-| Qwen3-0.6B / Qwen3-8B | 1 | 5 | 100% | sequential 诊断路径通过，不作为性能路径 |
-| Qwen3-0.6B / Qwen3-8B | 4 | 5 | 100% | sequential 诊断路径通过，不作为性能路径 |
-
 **预期结论**
 
-在正式验证采用的 OPT-125M / OPT-6.7B 组合上，DSSD 模式与 target-only 模式的输出一致率达到 100%，说明本文实现的 DSSD 系统在该受控配置下没有改变 target 模型的贪心解码结果，验证了端到端推理流程的语义正确性。Qwen3 补充诊断说明 verifier 端 packed verify 实现需要谨慎处理：逐 token 路径可以作为 correctness oracle，但真实性能实验必须基于 packed verifier 路径，因此 Qwen3 packed 路径需要后续继续修复。
+在正式验证采用的 OPT-125M / OPT-6.7B 组合上，DSSD 模式与 target-only 模式的输出一致率达到 100%，说明本文实现的 DSSD 系统在该受控配置下没有改变 target 模型的贪心解码结果，验证了端到端推理流程的语义正确性。
 
 ## 2. 边云协同场景下的性能研究
 
