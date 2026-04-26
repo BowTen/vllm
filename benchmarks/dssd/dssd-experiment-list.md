@@ -172,6 +172,13 @@ gamma = 1, 2, 4, 6, 8
 | 高接受率连续文本 | 高 | 展示 DSSD 加速上限 |
 | 普通或不稳定 prompt | 中低 | 展示 DSSD 收益边界 |
 
+本实验使用两个固定 prompt 文件：
+
+- 高接受率连续文本：`benchmarks/dssd/prompts/high_acceptance_opt.jsonl`
+- 普通或不稳定 prompt：`benchmarks/dssd/prompts/general_mixed_prompt.jsonl`
+
+对 Qwen3-0.6B / Qwen3-8B，结果表按实测 draft acceptance 归类：`general_mixed_prompt.jsonl` 作为高接受率条件，`high_acceptance_opt.jsonl` 作为普通 prompt 对照。
+
 **建议模型组合**
 
 | 模型组合 | 预期 |
@@ -183,9 +190,14 @@ gamma = 1, 2, 4, 6, 8
 
 | 模型组合 | Prompt 类型 | 最优 gamma | Draft Acceptance | Server token/s | Speedup vs Target-only |
 |---|---|---:|---:|---:|---:|
-| OPT-125M / OPT-6.7B | 高接受率 | 待填 | 待填 | 待填 | 待填 |
-| OPT-125M / OPT-6.7B | 普通 prompt | 待填 | 待填 | 待填 | 待填 |
-| Qwen3-0.6B / Qwen3-8B | 普通 prompt | 待填 | 待填 | 待填 | 待填 |
+| OPT-125M / OPT-6.7B | 高接受率 | 8 | 81.99% | 360.81 | 3.49x |
+| OPT-125M / OPT-6.7B | 普通 prompt | 8 | 45.39% | 218.02 | 2.11x |
+| Qwen3-0.6B / Qwen3-8B | 高接受率 | 4 | 69.49% | 153.94 | 1.65x |
+| Qwen3-0.6B / Qwen3-8B | 普通 prompt | 4 | 55.00% | 130.51 | 1.38x |
+
+**结果记录**
+
+- `benchmarks/dssd/results/experiment-2.2-acceptance-performance-2026-04-26.md`
 
 **预期结论**
 
