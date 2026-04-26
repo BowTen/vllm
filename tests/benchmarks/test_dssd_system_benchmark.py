@@ -234,6 +234,59 @@ def test_start_verifier_server_omits_kv_cache_override_when_unset(
     assert "--kv-cache-memory-bytes" not in captured["cmd"]
 
 
+def test_start_verifier_server_passes_no_enforce_eager(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _load_module()
+    captured = {}
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+    monkeypatch.setattr(
+        module,
+        "_wait_for_server_url",
+        lambda ready_file, proc: "http://127.0.0.1:18021",
+    )
+
+    config = module.BenchmarkConfig(
+        model="/tmp/model",
+        edge_model="/tmp/model",
+        verifier_model="/tmp/model",
+        edge_model_runner="v1",
+        verifier_model_runner="v1",
+        edge_cuda_visible_devices="0",
+        verifier_cuda_visible_devices="0",
+        verifier_host="127.0.0.1",
+        verifier_port=18021,
+        prompt_len=18,
+        decode_tokens=8,
+        warmup_tokens=0,
+        repeats=1,
+        gamma=2,
+        gpu_memory_utilization=0.8,
+        max_model_len=64,
+        kv_cache_memory_bytes=None,
+        max_num_batched_tokens=16,
+        max_num_seqs=2,
+        enforce_eager=False,
+        async_scheduling=False,
+    )
+
+    module._start_verifier_server(config)
+
+    assert "--no-enforce-eager" in captured["cmd"]
+
+
 def test_build_edge_service_passes_model_runner_version(monkeypatch) -> None:
     module = _load_module()
     captured = {}

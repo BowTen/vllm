@@ -598,6 +598,8 @@ def _start_verifier_server(
                 str(config.kv_cache_memory_bytes),
             ]
         )
+    if not config.enforce_eager:
+        base_cmd.append("--no-enforce-eager")
     if config.async_scheduling:
         base_cmd.append("--async-scheduling")
     proc = subprocess.Popen(

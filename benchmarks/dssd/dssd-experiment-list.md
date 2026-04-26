@@ -120,7 +120,7 @@ pytest tests/benchmarks/test_dssd_local_engine_benchmark.py -v
 | prompt_len | 128 |
 | output_tokens | 256 |
 | temperature | 0.0 |
-| repeats | 5 |
+| repeats | 20 |
 | warmup_repeats | 2 |
 | model runner | v1 |
 | execution | `--no-enforce-eager` |
@@ -142,14 +142,18 @@ gamma = 1, 2, 4, 6, 8
 
 **论文结果表**
 
+**本次结果**
+
+结果记录：`benchmarks/dssd/results/experiment-2.1-basic-performance-gamma-sweep-2026-04-25.md`
+
 | 模型组合 | 模式 | gamma | Draft Acceptance | Avg Accepted Len / Round | Server token/s | Speedup |
 |---|---|---:|---:|---:|---:|---:|
-| OPT-125M / OPT-6.7B | Target-only | - | - | - | 待填 | 1.00x |
-| OPT-125M / OPT-6.7B | DSSD | 1 | 待填 | 待填 | 待填 | 待填 |
-| OPT-125M / OPT-6.7B | DSSD | 2 | 待填 | 待填 | 待填 | 待填 |
-| OPT-125M / OPT-6.7B | DSSD | 4 | 待填 | 待填 | 待填 | 待填 |
-| OPT-125M / OPT-6.7B | DSSD | 6 | 待填 | 待填 | 待填 | 待填 |
-| OPT-125M / OPT-6.7B | DSSD | 8 | 待填 | 待填 | 待填 | 待填 |
+| OPT-125M / OPT-6.7B | Target-only | - | - | - | 103.29 | 1.00x |
+| OPT-125M / OPT-6.7B | DSSD | 1 | 93.94% | 0.94 | 133.72 | 1.29x |
+| OPT-125M / OPT-6.7B | DSSD | 2 | 96.02% | 1.92 | 191.86 | 1.86x |
+| OPT-125M / OPT-6.7B | DSSD | 4 | 89.29% | 3.57 | 261.24 | 2.53x |
+| OPT-125M / OPT-6.7B | DSSD | 6 | 84.11% | 5.05 | 313.26 | 3.03x |
+| OPT-125M / OPT-6.7B | DSSD | 8 | 81.99% | 6.56 | 360.81 | 3.49x |
 
 **预期结论**
 
