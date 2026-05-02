@@ -1,0 +1,2 @@
+{"case_id":"greedy-small","prompt":"The capital of France is","max_tokens":16,"gamma":4,"seed":0,"temperature":0.0,"top_p":1.0,"top_k":-1,"ignore_eos":false}
+{"case_id":"sampling-small","prompt":"Once upon a time","max_tokens":24,"gamma":4,"seed":1234,"temperature":0.8,"top_p":0.95,"top_k":50,"ignore_eos":true}

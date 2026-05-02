@@ -134,13 +134,14 @@ class FakeVerifierDecodeEngine:
 def test_in_process_service_round_trip_runs_full_dssd_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from vllm.dssd.service import edge_service
     from vllm.dssd.service import DSSDEdgeService, DSSDVerifierService
     from vllm.dssd.transport import FakeNetwork, InProcessVerifierTransport
 
     monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.tensor([2], dtype=torch.int64),
+        edge_service,
+        "random_sample",
+        lambda probs, generators: torch.tensor([2], dtype=torch.int64),
     )
 
     verifier_engine = FakeVerifierDecodeEngine()

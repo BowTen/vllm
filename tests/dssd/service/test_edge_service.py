@@ -220,13 +220,16 @@ def test_edge_service_complete_encodes_prompt_and_decodes_generated_ids() -> Non
 def test_edge_service_generate_reject_path_rolls_back_and_resamples(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from vllm.dssd.service import edge_service
     from vllm.dssd.service.edge_service import DSSDEdgeService
 
-    monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.tensor([2], dtype=torch.int64),
-    )
+    random_sample_calls = []
+
+    def fake_random_sample(probs, generators):
+        random_sample_calls.append((probs.clone(), dict(generators)))
+        return torch.tensor([2], dtype=torch.int64)
+
+    monkeypatch.setattr(edge_service, "random_sample", fake_random_sample)
     edge_engine = FakeEdgeDecodeEngine()
     verifier = FakeVerifierTransport(
         verify_responses=[
@@ -250,9 +253,12 @@ def test_edge_service_generate_reject_path_rolls_back_and_resamples(
     output_ids = service.generate(
         req_id="req-1",
         prompt_token_ids=[1, 3],
-        sampling_params=SamplingParams(max_tokens=8, temperature=0.0),
+        sampling_params=SamplingParams(max_tokens=8, temperature=0.7),
     )
 
+    sampled_probs, sampled_generators = random_sample_calls[0]
+    assert sampled_probs.shape == (1, 8)
+    assert sampled_generators == {}
     assert edge_engine.rollback_calls == [1]
     assert edge_engine.commit_external_calls == [2]
     assert output_ids == [17, 19, 2]
@@ -264,13 +270,15 @@ def test_edge_service_generate_reject_path_rolls_back_and_resamples(
 def test_edge_service_reject_path_accepts_remote_cpu_logits_with_local_cuda_q(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from vllm.dssd.service import edge_service
     from vllm.dssd.service.edge_service import DSSDEdgeService
 
-    monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.tensor([2], device=probs.device),
-    )
+    def fake_random_sample(probs, generators):
+        assert probs.device.type == "cuda"
+        assert generators == {}
+        return torch.tensor([2], device=probs.device)
+
+    monkeypatch.setattr(edge_service, "random_sample", fake_random_sample)
     service = DSSDEdgeService(
         decode_engine=FakeEdgeDecodeEngine(),
         verifier=FakeVerifierTransport(verify_responses=[]),
@@ -305,15 +313,67 @@ def test_edge_service_reject_path_accepts_remote_cpu_logits_with_local_cuda_q(
     assert token_id == 2
 
 
+def test_edge_service_reject_path_forwards_session_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.dssd.service import edge_service
+    from vllm.dssd.service.edge_service import DSSDEdgeService
+
+    generator = torch.Generator(device="cpu")
+    random_sample_calls = []
+
+    def fake_random_sample(probs, generators):
+        random_sample_calls.append((probs.clone(), dict(generators)))
+        return torch.tensor([5], dtype=torch.int64)
+
+    monkeypatch.setattr(edge_service, "random_sample", fake_random_sample)
+    service = DSSDEdgeService(
+        decode_engine=FakeEdgeDecodeEngine(),
+        verifier=FakeVerifierTransport(verify_responses=[]),
+        eos_token_id=2,
+        gamma=2,
+    )
+    session = FakeSession(
+        req_id="req-1",
+        prompt_len=2,
+        token_ids=[1, 3, 17, 19, 20],
+        round_state=FakeRoundState(
+            draft_token_ids=[19, 20],
+            draft_q_values=[0.6, 0.4],
+            draft_logits_rows=[
+                torch.zeros(8, dtype=torch.float32),
+                torch.zeros(8, dtype=torch.float32),
+            ],
+        ),
+    )
+    session._dssd_sampling_generator = generator
+    response = VerifyRoundResponse(
+        req_id="req-1",
+        accepted_len=1,
+        rejected_target_logits=torch.tensor(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0],
+            dtype=torch.float32,
+        ),
+    )
+
+    token_id = service._resample_rejected_token(session, response)  # noqa: SLF001
+
+    assert token_id == 5
+    assert random_sample_calls[0][1] == {0: generator}
+
+
 def test_edge_service_greedy_reject_path_uses_target_argmax(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vllm.dssd.service.edge_service import DSSDEdgeService
 
-    def fail_multinomial(*_args, **_kwargs):
+    def fail_random_sample(*_args, **_kwargs):
         raise AssertionError("greedy rejection must not resample")
 
-    monkeypatch.setattr(torch, "multinomial", fail_multinomial)
+    monkeypatch.setattr(
+        "vllm.dssd.service.edge_service.random_sample",
+        fail_random_sample,
+    )
     service = DSSDEdgeService(
         decode_engine=FakeEdgeDecodeEngine(),
         verifier=FakeVerifierTransport(verify_responses=[]),

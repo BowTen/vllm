@@ -47,6 +47,7 @@ class FakeInputBatch:
     def __init__(self) -> None:
         self.sampling_metadata = SimpleNamespace(tag="sampling-metadata")
         self.req_id_to_index = {"req-1": 0}
+        self.generators = {}
         self.req_output_token_ids = [[]]
         self.token_ids_cpu = torch.zeros((1, 16), dtype=torch.int32).numpy()
         self.is_token_ids = torch.zeros((1, 16), dtype=torch.bool).numpy()
@@ -279,6 +280,26 @@ def test_open_prefill_commit_external_rollback_and_close_session() -> None:
     assert state_bridge.clear_calls[-1] is session
     assert session.round_state.draft_token_ids == []
     assert model_runner.execute_model_state is None
+
+
+def test_prefill_attaches_input_batch_generator_to_session() -> None:
+    engine, worker, _scheduler, _state_bridge, _draft_sampler, model_runner = (
+        make_engine()
+    )
+    generator = torch.Generator(device="cpu")
+    model_runner.input_batch.generators = {0: generator}
+    worker.outputs = [
+        ModelRunnerOutput(req_ids=["req-1"], req_id_to_index={"req-1": 0})
+    ]
+    session = engine.open_session(
+        req_id="req-1",
+        prompt_token_ids=[10, 11],
+        sampling_params=SamplingParams(max_tokens=8, seed=123),
+    )
+
+    engine.prefill(session, bootstrap_token_id=21)
+
+    assert session._dssd_sampling_generator is generator
 
 
 @pytest.mark.parametrize(("sampling_params", "expected_message"),

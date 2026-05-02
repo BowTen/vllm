@@ -84,6 +84,7 @@ class EdgeDecodeEngineV1:
         bootstrap_token_id: int,
     ) -> int:
         self._execute(self.scheduler.build_prefill_step(session))
+        self._attach_sampling_generator(session)
         self._clear_execute_model_state()
         session.num_computed_tokens = session.prompt_len
         session.total_len = session.prompt_len
@@ -290,3 +291,15 @@ class EdgeDecodeEngineV1:
 
     def _clear_execute_model_state(self) -> None:
         self._take_execute_model_state()
+
+    def _attach_sampling_generator(self, session: EdgeSession) -> None:
+        input_batch = self.model_runner.input_batch
+        req_idx = input_batch.req_id_to_index.get(session.req_id)
+        if req_idx is None:
+            return
+        generators = getattr(input_batch, "generators", None)
+        if generators is None:
+            return
+        generator = generators.get(req_idx)
+        if generator is not None:
+            session._dssd_sampling_generator = generator

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 
@@ -8,6 +9,21 @@ from vllm.dssd.edge.types import EdgeOpenSessionResult
 from vllm.dssd.protocol import VerifyRoundRequest
 
 _GREEDY_TEMPERATURE_EPS = 1e-5
+_RandomSampleFn = Callable[[torch.Tensor, dict[int, torch.Generator]], torch.Tensor]
+random_sample: _RandomSampleFn | None
+random_sample = None
+
+
+def _random_sample(
+    probs: torch.Tensor,
+    generators: dict[int, torch.Generator],
+) -> torch.Tensor:
+    global random_sample
+    if random_sample is None:
+        from vllm.v1.sample.ops.topk_topp_sampler import random_sample as sample
+
+        random_sample = sample
+    return random_sample(probs, generators)
 
 
 @dataclass
@@ -252,7 +268,10 @@ class DSSDEdgeService:
         if float(norm.item()) <= 0.0:
             residual = p_probs
             norm = residual.sum()
-        sampled = torch.multinomial(residual / norm, num_samples=1)
+        probs = (residual / norm).view(1, -1)
+        generator = getattr(session, "_dssd_sampling_generator", None)
+        generators = {0: generator} if generator is not None else {}
+        sampled = _random_sample(probs, generators)
         return int(sampled.item())
 
     @staticmethod

@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import torch
 
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+
 from .types import VerifierRoundRequest, VerifierRoundResult
 
 _GREEDY_TEMPERATURE_EPS = 1e-5
@@ -89,12 +91,17 @@ class DSSDVerifierSamplerV1:
                 bonus_token_id=int(bonus_output.sampled_token_ids[0, 0].item()),
             )
 
+        sampling_target_logits = self._apply_random_sampling_processors(
+            processed_target_logits,
+            sampling_metadata,
+        )
+
         q_values = torch.tensor(
             request.draft_q_values,
-            device=processed_target_logits.device,
-            dtype=processed_target_logits.dtype,
-        ).clamp_min_(torch.finfo(processed_target_logits.dtype).tiny)
-        probs = torch.softmax(processed_target_logits[:draft_len], dim=-1)
+            device=sampling_target_logits.device,
+            dtype=sampling_target_logits.dtype,
+        ).clamp_min_(torch.finfo(sampling_target_logits.dtype).tiny)
+        probs = torch.softmax(sampling_target_logits[:draft_len], dim=-1)
         draft_probs = probs.gather(1, draft_token_ids.view(-1, 1)).squeeze(1)
 
         generator = sampling_metadata.generators.get(0)
@@ -111,7 +118,7 @@ class DSSDVerifierSamplerV1:
             return VerifierRoundResult(
                 req_id=request.req_id,
                 accepted_len=reject_idx,
-                rejected_target_logits=processed_target_logits[reject_idx].detach(
+                rejected_target_logits=sampling_target_logits[reject_idx].detach(
                 ).clone(),
             )
 
@@ -134,3 +141,24 @@ class DSSDVerifierSamplerV1:
         if temperature is None:
             return False
         return bool(torch.all(temperature < _GREEDY_TEMPERATURE_EPS).item())
+
+    def _apply_random_sampling_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata,
+    ) -> torch.Tensor:
+        assert sampling_metadata.temperature is not None
+        logits = self.sampler.apply_temperature(
+            logits,
+            sampling_metadata.temperature,
+            sampling_metadata.all_random,
+        )
+
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            logits = processor.apply(logits)
+
+        return apply_top_k_top_p(
+            logits,
+            sampling_metadata.top_k,
+            sampling_metadata.top_p,
+        )

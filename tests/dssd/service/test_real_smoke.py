@@ -947,6 +947,7 @@ def test_real_external_draft_reject_resamples_to_target_token(
     monkeypatch: pytest.MonkeyPatch,
     real_dssd_runtime,
 ) -> None:
+    from vllm.dssd.service import edge_service as edge_service_module
     from vllm.dssd.service.edge_service import DSSDEdgeService
     import torch
 
@@ -968,12 +969,11 @@ def test_real_external_draft_reject_resamples_to_target_token(
     prompt_token_ids = [1, 2, 3]
 
     monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.argmax(
+        edge_service_module,
+        "random_sample",
+        lambda probs, generators: torch.argmax(
             probs,
             dim=-1,
-            keepdim=True,
         ).to(dtype=torch.int64),
     )
 
@@ -1032,6 +1032,7 @@ def test_real_edge_service_generate_matches_direct_target(
     monkeypatch: pytest.MonkeyPatch,
     real_dssd_runtime,
 ) -> None:
+    from vllm.dssd.service import edge_service as edge_service_module
     from vllm.dssd.service.edge_service import DSSDEdgeService
     import torch
 
@@ -1054,12 +1055,11 @@ def test_real_edge_service_generate_matches_direct_target(
     prompt_token_ids = [1, 2, 3]
 
     monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.argmax(
+        edge_service_module,
+        "random_sample",
+        lambda probs, generators: torch.argmax(
             probs,
             dim=-1,
-            keepdim=True,
         ).to(dtype=torch.int64),
     )
 
@@ -1083,6 +1083,7 @@ def test_real_edge_service_generate_matches_direct_target_v1(
     monkeypatch: pytest.MonkeyPatch,
     real_dssd_runtime_v1_edge_v2_verifier,
 ) -> None:
+    from vllm.dssd.service import edge_service as edge_service_module
     from vllm.dssd.service.edge_service import DSSDEdgeService
     import torch
 
@@ -1107,12 +1108,11 @@ def test_real_edge_service_generate_matches_direct_target_v1(
     prompt_token_ids = [1, 2, 3]
 
     monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.argmax(
+        edge_service_module,
+        "random_sample",
+        lambda probs, generators: torch.argmax(
             probs,
             dim=-1,
-            keepdim=True,
         ).to(dtype=torch.int64),
     )
 
@@ -1136,6 +1136,7 @@ def test_real_edge_service_generate_matches_direct_target_split_runtime(
     monkeypatch: pytest.MonkeyPatch,
     real_split_dssd_runtime,
 ) -> None:
+    from vllm.dssd.service import edge_service as edge_service_module
     from vllm.dssd.service.edge_service import DSSDEdgeService
     import torch
 
@@ -1158,12 +1159,11 @@ def test_real_edge_service_generate_matches_direct_target_split_runtime(
     prompt_token_ids = [1, 2, 3]
 
     monkeypatch.setattr(
-        torch,
-        "multinomial",
-        lambda probs, num_samples: torch.argmax(
+        edge_service_module,
+        "random_sample",
+        lambda probs, generators: torch.argmax(
             probs,
             dim=-1,
-            keepdim=True,
         ).to(dtype=torch.int64),
     )
 

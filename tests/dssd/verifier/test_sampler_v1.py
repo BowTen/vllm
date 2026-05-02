@@ -60,6 +60,11 @@ class _OldSampler:
         ).unsqueeze(1)
         return logits + (row_offsets * 0.25)
 
+    @staticmethod
+    def apply_temperature(logits, temperature, all_random):
+        del all_random
+        return logits.div_(temperature.unsqueeze(dim=1))
+
     def __call__(
         self,
         logits,
@@ -236,6 +241,35 @@ def test_reject_round_returns_processed_target_logits() -> None:
             processed_target_logits[result.accepted_len],
         )
         assert result.bonus_token_id is None
+
+
+def test_reject_round_returns_sampling_target_logits() -> None:
+    sampler = DSSDVerifierSamplerV1(_OldSampler())
+    sampling_metadata = _sampling_metadata()
+    sampling_metadata.temperature = torch.tensor([2.0])
+    sampling_metadata.top_k = torch.tensor([1], dtype=torch.int64)
+    logits = torch.tensor(
+        [[0.0, 4.0, 1.0], [5.0, 2.0, 0.0], [0.0, 0.0, 3.0]],
+        dtype=torch.float32,
+    )
+
+    result = sampler.verify_round(
+        logits=logits,
+        spec_decode_metadata=_metadata(torch.device("cpu")),
+        sampling_metadata=sampling_metadata,
+        request=VerifierRoundRequest(
+            req_id="req-1",
+            committed_token_id=7,
+            draft_token_ids=[0, 1],
+            draft_q_values=[1.0, 1.0],
+        ),
+    )
+
+    assert result.accepted_len == 0
+    assert result.rejected_target_logits is not None
+    assert torch.isneginf(result.rejected_target_logits[0])
+    assert torch.isfinite(result.rejected_target_logits[1])
+    assert torch.isneginf(result.rejected_target_logits[2])
 
 
 def test_greedy_round_accepts_matching_draft_tokens_by_argmax() -> None:
