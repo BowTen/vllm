@@ -136,7 +136,7 @@ done
 | 比较器 | `experiments/dssd_correctness/compare_outputs.py` |
 | case 数量 | 建议 5 条 prompt，每条 2 个 seed，每个 gamma 共 10 cases；两个 gamma 共 20 cases |
 | prompt_len | `128` |
-| max_tokens | `64` |
+| max_tokens | `32` |
 | gamma | `4` 和 `8` |
 | sampling params | `temperature=0.8`、`top_p=0.95`、`top_k=50`、`ignore_eos=True` |
 | seed | `0` 和 `1234` |
@@ -155,7 +155,7 @@ from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(os.environ["TOKENIZER"], local_files_only=Path(os.environ["TOKENIZER"]).exists())
 prompt_path = Path(os.environ["PROMPT_JSONL"])
-out_path = Path(os.environ["RESULT_DIR"]) / "e2-nongreedy-cases-opt125m-opt67b-p128-o64.jsonl"
+out_path = Path(os.environ["RESULT_DIR"]) / "e2-nongreedy-cases-opt125m-opt67b-p128-o32.jsonl"
 
 prompts = []
 with prompt_path.open(encoding="utf-8") as f:
@@ -175,7 +175,7 @@ with out_path.open("w", encoding="utf-8") as out:
                 out.write(json.dumps({
                     "case_id": f"opt-p{prompt_idx}-g{gamma}-seed{seed}",
                     "prompt_token_ids": token_ids,
-                    "max_tokens": 64,
+                    "max_tokens": 32,
                     "gamma": gamma,
                     "seed": seed,
                     "temperature": 0.8,
@@ -191,18 +191,20 @@ PY
 
 ```bash
 PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=1 .venv/bin/python \
-  experiments/dssd_correctness/generate_vllm_reference.py \
+  -m experiments.dssd_correctness.generate_vllm_reference \
     --draft-model "$EDGE_MODEL" \
     --target-model "$TARGET_MODEL" \
     --tokenizer "$TOKENIZER" \
-    --cases "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o64.jsonl" \
-    --output "$RESULT_DIR/e2-reference-opt125m-opt67b-p128-o64.jsonl" \
+    --cases "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o32.jsonl" \
+    --output "$RESULT_DIR/e2-reference-opt125m-opt67b-p128-o32.jsonl" \
     --device cuda \
     --dtype auto \
-    --max-model-len 512 \
+    --max-model-len 256 \
     --max-num-batched-tokens 128 \
     --max-num-seqs 2 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.05 \
+    --kv-cache-memory-bytes 536870912 \
+    --logprobs-mode raw_logits \
     --no-enforce-eager
 ```
 
@@ -217,8 +219,9 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m vllm.dssd.entrypoints
   --model "$TARGET_MODEL" \
   --model-runner-version v1 \
   --gamma 4 \
-  --max-model-len 512 \
+  --max-model-len 256 \
   --gpu-memory-utilization 0.9 \
+  --kv-cache-memory-bytes 536870912 \
   --max-num-batched-tokens 128 \
   --max-num-seqs 2 \
   --no-enforce-eager
@@ -234,8 +237,9 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m vllm.dssd.entrypoints
   --model "$EDGE_MODEL" \
   --model-runner-version v1 \
   --gamma 4 \
-  --max-model-len 512 \
+  --max-model-len 256 \
   --gpu-memory-utilization 0.9 \
+  --kv-cache-memory-bytes 536870912 \
   --max-num-batched-tokens 128 \
   --max-num-seqs 2 \
   --no-enforce-eager
@@ -246,8 +250,8 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m vllm.dssd.entrypoints
 如果当前 edge server 用 `gamma=4` 启动，就只运行 `case_id` 中含 `g4` 的 cases；`gamma=8` 同理。可用下面命令生成分组文件：
 
 ```bash
-grep 'g4-seed' "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o64.jsonl" > "$RESULT_DIR/e2-cases-g4.jsonl"
-grep 'g8-seed' "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o64.jsonl" > "$RESULT_DIR/e2-cases-g8.jsonl"
+grep 'g4-seed' "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o32.jsonl" > "$RESULT_DIR/e2-cases-g4-o32.jsonl"
+grep 'g8-seed' "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o32.jsonl" > "$RESULT_DIR/e2-cases-g8-o32.jsonl"
 ```
 
 运行 DSSD：
@@ -255,18 +259,18 @@ grep 'g8-seed' "$RESULT_DIR/e2-nongreedy-cases-opt125m-opt67b-p128-o64.jsonl" > 
 ```bash
 PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/run_dssd_cases.py \
   --endpoint http://127.0.0.1:6006/generate \
-  --cases "$RESULT_DIR/e2-cases-g4.jsonl" \
-  --output "$RESULT_DIR/e2-dssd-opt125m-opt67b-p128-o64-g4.jsonl"
+  --cases "$RESULT_DIR/e2-cases-g4-o32.jsonl" \
+  --output "$RESULT_DIR/e2-dssd-opt125m-opt67b-p128-o32-g4.jsonl"
 ```
 
 比较输出：
 
 ```bash
-grep 'g4-seed' "$RESULT_DIR/e2-reference-opt125m-opt67b-p128-o64.jsonl" > "$RESULT_DIR/e2-reference-g4.jsonl"
+grep 'g4-seed' "$RESULT_DIR/e2-reference-opt125m-opt67b-p128-o32.jsonl" > "$RESULT_DIR/e2-reference-g4-o32.jsonl"
 
 PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py \
-  --reference "$RESULT_DIR/e2-reference-g4.jsonl" \
-  --actual "$RESULT_DIR/e2-dssd-opt125m-opt67b-p128-o64-g4.jsonl"
+  --reference "$RESULT_DIR/e2-reference-g4-o32.jsonl" \
+  --actual "$RESULT_DIR/e2-dssd-opt125m-opt67b-p128-o32-g4.jsonl"
 ```
 
 对 `gamma=8` 重复启动、运行和比较步骤。
@@ -275,8 +279,8 @@ PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py
 
 | gamma | cases | matched_cases | 输出一致率 | sampling params | reference JSONL | DSSD JSONL | 比较结果 |
 |---:|---:|---:|---:|---|---|---|---|
-| 4 | 10 | 8 | 80% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g4.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o64-g4-rerun.jsonl` | failed: 2 mismatches, see `benchmarks/dssd/results/e2-compare-g4.txt` |
-| 8 | 10 | 0 | 0% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g8.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o64-g8.jsonl` | failed: 10 mismatches, see `benchmarks/dssd/results/e2-compare-g8.txt` |
+| 4 | 10 | 10 | 100% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g4-o32.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o32-g4.jsonl` | passed: `DSSD outputs match exactly.`, see `benchmarks/dssd/results/e2-compare-g4-o32.txt` |
+| 8 | 10 | 10 | 100% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g8-o32.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o32-g8.jsonl` | passed: `DSSD outputs match exactly.`, see `benchmarks/dssd/results/e2-compare-g8-o32.txt` |
 
 ### 3.8 论文中可用结论
 
