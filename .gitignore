@@ -202,6 +202,9 @@ cython_debug/
 
 # Results
 *.csv
+/artifacts/
+/docs/superpowers/plans/
+/docs/superpowers/specs/
 
 # Python pickle files
 *.pkl
