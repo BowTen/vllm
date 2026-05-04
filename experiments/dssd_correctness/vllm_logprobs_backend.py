@@ -107,24 +107,10 @@ class VllmLogprobsModel:
                 "token_ids must include a non-empty confirmed prefix plus draft tokens"
             )
 
-        output = self._generate(token_ids, self._verify_params)
-        prompt_logprobs = output.prompt_logprobs
-        if prompt_logprobs is None:
-            raise RuntimeError("vLLM did not return prompt logprobs")
-        sample_logprobs = output.outputs[0].logprobs
-        if sample_logprobs is None or len(sample_logprobs) < 1:
-            raise RuntimeError("vLLM did not return bonus logprobs")
-
         start = len(token_ids) - draft_len
         rows = []
-        for position in range(start, len(token_ids)):
-            row = prompt_logprobs[position]
-            if row is None:
-                raise RuntimeError(
-                    f"missing prompt logprobs at token position {position}"
-                )
-            rows.append(self._row_to_tensor(row))
-        rows.append(self._row_to_tensor(sample_logprobs[0]))
+        for end in range(start, len(token_ids) + 1):
+            rows.append(self.next_logits(token_ids[:end])[0])
         return torch.stack(rows, dim=0).unsqueeze(0)
 
     def _generate(self, token_ids: list[int], sampling_params: Any):
@@ -145,11 +131,7 @@ class VllmLogprobsModel:
                 "expected full-vocabulary logprobs; "
                 f"got {len(row)} entries for vocab size {self.vocab_size}"
             )
-        values = torch.empty(
-            self.vocab_size,
-            dtype=torch.float32,
-            device=self.device,
-        )
+        values = [0.0] * self.vocab_size
         for token_id, logprob in row.items():
             values[int(token_id)] = float(logprob.logprob)
-        return values
+        return torch.tensor(values, dtype=torch.float32, device=self.device)

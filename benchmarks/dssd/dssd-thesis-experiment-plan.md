@@ -110,11 +110,11 @@ done
 
 | gamma | prompt_count | matched_prompts | 输出一致率 | mean draft acceptance | mean avg accepted len | 原始 JSON |
 |---:|---:|---:|---:|---:|---:|---|
-| 1 |  |  |  |  |  |  |
-| 2 |  |  |  |  |  |  |
-| 4 |  |  |  |  |  |  |
-| 6 |  |  |  |  |  |  |
-| 8 |  |  |  |  |  |  |
+| 1 | 5 | 5 | 100% | 0.7253 | 0.7253 | `benchmarks/dssd/results/e1-greedy-consistency-opt125m-opt67b-p128-o64-g1.json` |
+| 2 | 5 | 5 | 100% | 0.6218 | 1.2435 | `benchmarks/dssd/results/e1-greedy-consistency-opt125m-opt67b-p128-o64-g2.json` |
+| 4 | 5 | 5 | 100% | 0.4796 | 1.9183 | `benchmarks/dssd/results/e1-greedy-consistency-opt125m-opt67b-p128-o64-g4.json` |
+| 6 | 5 | 5 | 100% | 0.3731 | 2.2387 | `benchmarks/dssd/results/e1-greedy-consistency-opt125m-opt67b-p128-o64-g6.json` |
+| 8 | 5 | 5 | 100% | 0.3222 | 2.5779 | `benchmarks/dssd/results/e1-greedy-consistency-opt125m-opt67b-p128-o64-g8.json` |
 
 ### 2.5 论文中可用结论
 
@@ -275,8 +275,8 @@ PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py
 
 | gamma | cases | matched_cases | 输出一致率 | sampling params | reference JSONL | DSSD JSONL | 比较结果 |
 |---:|---:|---:|---:|---|---|---|---|
-| 4 |  |  |  | `temp=0.8, top_p=0.95, top_k=50` |  |  |  |
-| 8 |  |  |  | `temp=0.8, top_p=0.95, top_k=50` |  |  |  |
+| 4 | 10 | 8 | 80% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g4.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o64-g4-rerun.jsonl` | failed: 2 mismatches, see `benchmarks/dssd/results/e2-compare-g4.txt` |
+| 8 | 10 | 0 | 0% | `temp=0.8, top_p=0.95, top_k=50` | `benchmarks/dssd/results/e2-reference-g8.jsonl` | `benchmarks/dssd/results/e2-dssd-opt125m-opt67b-p128-o64-g8.jsonl` | failed: 10 mismatches, see `benchmarks/dssd/results/e2-compare-g8.txt` |
 
 ### 3.8 论文中可用结论
 

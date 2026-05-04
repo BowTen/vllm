@@ -67,17 +67,22 @@ def test_next_logits_reads_full_sample_logprobs_as_logits_like_row():
     assert backend.llm.calls[0][1].logprobs == -1
 
 
-def test_verify_logits_reads_draft_rows_and_bonus_row():
-    output = SimpleNamespace(
-        prompt_logprobs=[
-            None,
-            _row([-1.0, -2.0, -3.0, -4.0]),
-            _row([-5.0, -6.0, -7.0, -8.0]),
-            _row([-9.0, -10.0, -11.0, -12.0]),
-        ],
-        outputs=[SimpleNamespace(logprobs=[_row([-13.0, -14.0, -15.0, -16.0])])],
-    )
-    backend = VllmLogprobsModel(_FakeLLM([output]), device="cpu")
+def test_verify_logits_reads_only_draft_rows_and_bonus_row():
+    outputs = [
+        SimpleNamespace(
+            prompt_logprobs=None,
+            outputs=[SimpleNamespace(logprobs=[_row([-5.0, -6.0, -7.0, -8.0])])],
+        ),
+        SimpleNamespace(
+            prompt_logprobs=None,
+            outputs=[SimpleNamespace(logprobs=[_row([-9.0, -10.0, -11.0, -12.0])])],
+        ),
+        SimpleNamespace(
+            prompt_logprobs=None,
+            outputs=[SimpleNamespace(logprobs=[_row([-13.0, -14.0, -15.0, -16.0])])],
+        ),
+    ]
+    backend = VllmLogprobsModel(_FakeLLM(outputs), device="cpu")
 
     logits = backend.verify_logits([101, 201, 202, 203], draft_len=2)
 
@@ -93,4 +98,9 @@ def test_verify_logits_reads_draft_rows_and_bonus_row():
             dtype=torch.float32,
         ),
     )
-    assert backend.llm.calls[0][1].prompt_logprobs == -1
+    assert [call[0][0]["prompt_token_ids"] for call in backend.llm.calls] == [
+        [101, 201],
+        [101, 201, 202],
+        [101, 201, 202, 203],
+    ]
+    assert all(call[1].prompt_logprobs is None for call in backend.llm.calls)
