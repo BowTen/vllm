@@ -82,6 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--trace-output", type=Path)
+    parser.add_argument("--trace-top-k", type=int, default=20)
     return parser.parse_args()
 
 
@@ -119,6 +121,8 @@ def main() -> None:
                 prompt_token_ids=_prompt_token_ids(case, tokenizer, case_id),
                 config=config,
                 seed=int(case.get("seed", 0)),
+                trace_path=args.trace_output,
+                trace_top_k=args.trace_top_k,
             )
             f.write(json.dumps(dataclasses.asdict(output)) + "\n")
 

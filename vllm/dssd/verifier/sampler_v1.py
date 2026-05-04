@@ -157,8 +157,29 @@ class DSSDVerifierSamplerV1:
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
             logits = processor.apply(logits)
 
+        top_k = self._expand_sampling_tensor(
+            sampling_metadata.top_k,
+            logits.shape[0],
+        )
+        top_p = self._expand_sampling_tensor(
+            sampling_metadata.top_p,
+            logits.shape[0],
+        )
         return apply_top_k_top_p(
             logits,
-            sampling_metadata.top_k,
-            sampling_metadata.top_p,
+            top_k,
+            top_p,
         )
+
+    @staticmethod
+    def _expand_sampling_tensor(
+        value: torch.Tensor | None,
+        num_rows: int,
+    ) -> torch.Tensor | None:
+        if value is None or value.shape[0] == num_rows:
+            return value
+        if value.shape[0] != 1:
+            raise ValueError(
+                "sampling metadata tensor must have one value or one per row"
+            )
+        return value.expand(num_rows)

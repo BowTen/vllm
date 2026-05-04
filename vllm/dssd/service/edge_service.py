@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import torch
@@ -24,6 +27,34 @@ def _random_sample(
 
         random_sample = sample
     return random_sample(probs, generators)
+
+
+def _trace_top_entries(
+    probs: torch.Tensor,
+    top_k: int,
+) -> list[dict[str, float | int]]:
+    limit = min(int(top_k), int(probs.numel()))
+    if limit <= 0:
+        return []
+    values, indices = torch.topk(probs.detach().to(torch.float32), k=limit)
+    return [
+        {"token_id": int(token_id.item()), "value": float(value.item())}
+        for value, token_id in zip(values.cpu(), indices.cpu())
+    ]
+
+
+def _append_trace_record(record: dict) -> None:
+    trace_path = os.environ.get("DSSD_CORRECTNESS_TRACE")
+    if not trace_path:
+        return
+    path = Path(trace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _trace_enabled() -> bool:
+    return bool(os.environ.get("DSSD_CORRECTNESS_TRACE"))
 
 
 @dataclass
@@ -158,6 +189,9 @@ class DSSDEdgeService:
                 return session.committed_output_ids()
 
             while True:
+                session._dssd_round_index = (
+                    getattr(session, "_dssd_round_index", 0) + 1
+                )
                 round_state = self.decode_engine.draft(
                     session,
                     committed_token_id,
@@ -268,11 +302,43 @@ class DSSDEdgeService:
         if float(norm.item()) <= 0.0:
             residual = p_probs
             norm = residual.sum()
-        probs = (residual / norm).view(1, -1)
+        recovery_probs = residual / norm
+        trace_recovery_probs = (
+            recovery_probs.detach().clone() if _trace_enabled() else None
+        )
+        probs = recovery_probs.view(1, -1)
         generator = getattr(session, "_dssd_sampling_generator", None)
         generators = {0: generator} if generator is not None else {}
         sampled = _random_sample(probs, generators)
-        return int(sampled.item())
+        sampled_token_id = int(sampled.item())
+        if trace_recovery_probs is not None:
+            rejected_draft_token_id = int(
+                session.round_state.draft_token_ids[rejected_index]
+            )
+            _append_trace_record(
+                {
+                    "source": "dssd_edge_resample",
+                    "req_id": session.req_id,
+                    "round_index": getattr(session, "_dssd_round_index", None),
+                    "accepted_len": response.accepted_len,
+                    "rejected_index": rejected_index,
+                    "confirmed_prefix": list(session.token_ids),
+                    "draft_token_ids": list(session.round_state.draft_token_ids),
+                    "draft_q_values": list(session.round_state.draft_q_values),
+                    "rejected_draft_token_id": rejected_draft_token_id,
+                    "p_value": float(p_probs[rejected_draft_token_id].item()),
+                    "q_value": float(q_probs[rejected_draft_token_id].item()),
+                    "residual_norm": float(norm.item()),
+                    "recovery_token_id": sampled_token_id,
+                    "p_top": _trace_top_entries(p_probs, 20),
+                    "q_top": _trace_top_entries(q_probs, 20),
+                    "residual_top": _trace_top_entries(
+                        trace_recovery_probs, 20
+                    ),
+                    "sample_score_top": _trace_top_entries(probs[0], 20),
+                }
+            )
+        return sampled_token_id
 
     @staticmethod
     def _is_greedy_session(session) -> bool:

@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-seqs", type=int)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--kv-cache-memory-bytes", type=int)
+    parser.add_argument("--trace-output", type=Path)
+    parser.add_argument("--trace-top-k", type=int, default=20)
     parser.add_argument(
         "--logprobs-mode",
         default="raw_logits",
@@ -105,6 +107,8 @@ def main() -> None:
                 prompt_token_ids=_prompt_token_ids(case, tokenizer, case_id),
                 config=config,
                 seed=int(case.get("seed", 0)),
+                trace_path=args.trace_output,
+                trace_top_k=args.trace_top_k,
             )
             f.write(json.dumps(dataclasses.asdict(output)) + "\n")
 

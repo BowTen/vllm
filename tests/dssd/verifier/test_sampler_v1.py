@@ -272,6 +272,28 @@ def test_reject_round_returns_sampling_target_logits() -> None:
     assert torch.isneginf(result.rejected_target_logits[2])
 
 
+def test_random_sampling_processors_expand_top_k_per_target_row() -> None:
+    sampler = DSSDVerifierSamplerV1(_OldSampler())
+    sampling_metadata = _sampling_metadata()
+    sampling_metadata.top_k = torch.tensor([1], dtype=torch.int64)
+    logits = torch.tensor(
+        [[0.0, 100.0, 0.0], [0.0, 0.0, 10.0]],
+        dtype=torch.float32,
+    )
+
+    processed = sampler._apply_random_sampling_processors(  # noqa: SLF001
+        logits,
+        sampling_metadata,
+    )
+
+    assert torch.isneginf(processed[0, 0])
+    assert torch.isfinite(processed[0, 1])
+    assert torch.isneginf(processed[0, 2])
+    assert torch.isneginf(processed[1, 0])
+    assert torch.isneginf(processed[1, 1])
+    assert torch.isfinite(processed[1, 2])
+
+
 def test_greedy_round_accepts_matching_draft_tokens_by_argmax() -> None:
     old_sampler = _OldSampler(sampled_token_id=2)
     sampler = DSSDVerifierSamplerV1(old_sampler)

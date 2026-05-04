@@ -1,4 +1,6 @@
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -78,6 +80,29 @@ def _logits_for_sampling(
     return apply_reference_logits_processors(logits, config)
 
 
+def _top_entries(probs: torch.Tensor, top_k: int) -> list[dict[str, float | int]]:
+    limit = min(int(top_k), int(probs.numel()))
+    if limit <= 0:
+        return []
+    values, indices = torch.topk(probs.detach().to(torch.float32), k=limit)
+    return [
+        {"token_id": int(token_id.item()), "value": float(value.item())}
+        for value, token_id in zip(values.cpu(), indices.cpu())
+    ]
+
+
+def _append_trace_record(
+    trace_path: str | Path | None,
+    record: dict[str, Any],
+) -> None:
+    if trace_path is None:
+        return
+    path = Path(trace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _next_logits(
     model: Any, input_ids: list[int], device: torch.device | str | None = None
 ) -> torch.Tensor:
@@ -147,6 +172,8 @@ def generate_dssd_reference(
     prompt_token_ids: list[int],
     config: DSSDReferenceSamplingConfig,
     seed: int,
+    trace_path: str | Path | None = None,
+    trace_top_k: int = 20,
 ) -> DSSDReferenceOutput:
     if config.max_tokens < 1:
         raise ValueError("max_tokens must be at least 1")
@@ -267,6 +294,35 @@ def generate_dssd_reference(
                 sample_vllm_v1_random(
                     recovery_probs.unsqueeze(0), draft_generator
                 ).item()
+            )
+            _append_trace_record(
+                trace_path,
+                {
+                    "source": "reference_resample",
+                    "case_id": case_id,
+                    "round_index": len(rounds) + 1,
+                    "accepted_len": accepted_len,
+                    "rejected_index": accepted_len,
+                    "confirmed_prefix": list(
+                        confirmed + draft_token_ids[:accepted_len]
+                    ),
+                    "draft_token_ids": list(draft_token_ids),
+                    "draft_q_values": list(draft_q_values),
+                    "rejected_draft_token_id": int(
+                        draft_token_ids[accepted_len]
+                    ),
+                    "p_value": float(
+                        p_probs[draft_token_ids[accepted_len]].item()
+                    ),
+                    "q_value": float(
+                        q_probs[draft_token_ids[accepted_len]].item()
+                    ),
+                    "residual_norm": float(residual_norm.item()),
+                    "recovery_token_id": recovery_token_id,
+                    "p_top": _top_entries(p_probs, trace_top_k),
+                    "q_top": _top_entries(q_probs, trace_top_k),
+                    "residual_top": _top_entries(recovery_probs, trace_top_k),
+                },
             )
             committed_this_round.append(recovery_token_id)
 
