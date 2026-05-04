@@ -294,6 +294,21 @@ def test_random_sampling_processors_expand_top_k_per_target_row() -> None:
     assert torch.isfinite(processed[1, 2])
 
 
+def test_expand_sampling_tensor_returns_contiguous_rows() -> None:
+    value = torch.tensor([0.95], dtype=torch.float32)
+
+    expanded = DSSDVerifierSamplerV1._expand_sampling_tensor(  # noqa: SLF001
+        value,
+        8,
+    )
+
+    assert expanded is not None
+    assert expanded.shape == (8,)
+    assert expanded.is_contiguous()
+    assert expanded.stride() == (1,)
+    torch.testing.assert_close(expanded, torch.full((8,), 0.95))
+
+
 def test_greedy_round_accepts_matching_draft_tokens_by_argmax() -> None:
     old_sampler = _OldSampler(sampled_token_id=2)
     sampler = DSSDVerifierSamplerV1(old_sampler)

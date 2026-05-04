@@ -176,10 +176,12 @@ class DSSDVerifierSamplerV1:
         value: torch.Tensor | None,
         num_rows: int,
     ) -> torch.Tensor | None:
-        if value is None or value.shape[0] == num_rows:
-            return value
+        if value is None:
+            return None
+        if value.shape[0] == num_rows:
+            return value if value.is_contiguous() else value.contiguous()
         if value.shape[0] != 1:
             raise ValueError(
                 "sampling metadata tensor must have one value or one per row"
             )
-        return value.expand(num_rows)
+        return value.expand(num_rows).contiguous()
