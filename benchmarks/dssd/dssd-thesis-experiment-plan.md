@@ -480,6 +480,8 @@ PY
 
 执行日期：2026-05-04 至 2026-05-05。该组实验保持 E3 的 prompt、模型、带宽、输出长度和 repeats 配置不变，将采样温度改为 `temperature=0.1`，固定 `seed=0`、`ignore_eos=True`。每个 JSONL 文件包含 22 条记录，其中前 2 条为 warmup，后 20 条用于计算均值。第一轮覆盖 `gamma=1,2,4,6,8`；补充实验继续增加 `gamma=10,12`。
 
+0ms target-only baseline 原始结果：`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g1-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g2-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g4-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g6-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g8-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g10-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g12-0ms-baseline.jsonl`。
+
 | DSSD latency(ms) | gamma | 0ms target-only token/s | DSSD token/s | speedup vs 0ms target-only | draft acceptance | avg accepted len | all-accept round | rounds | 原始结果 |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 0 | 1 | 102.09 | 119.19 | 1.17 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat0ms-100mbps.jsonl` |
