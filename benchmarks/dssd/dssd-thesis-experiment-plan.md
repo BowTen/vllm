@@ -290,19 +290,20 @@ PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py
 
 ### 4.1 实验目的
 
-评估 DSSD 在不同 draft 长度和 edge-verifier 网络延迟下的吞吐表现，找出 DSSD 超过 target-only 的网络条件和最佳 `gamma` 区间。这里的网络延迟只应作用于 DSSD 的 edge-verifier 通信；target-only 表示 target 模型单独推理，不存在 DSSD 的多轮 edge-verifier 交互，因此所有 speedup 都使用 0ms target-only 基线计算。
+评估 DSSD 在非贪心采样条件下，不同 draft 长度和 edge-verifier 网络延迟对吞吐的影响，找出 DSSD 超过 target-only 的网络条件和最佳 `gamma` 区间。这里的网络延迟只作用于 DSSD 的 edge-verifier 通信；target-only 表示 target 模型单独推理，不存在 DSSD 的多轮 edge-verifier 交互，因此所有 speedup 都使用 0ms target-only 基线计算。
 
 ### 4.2 实验配置
 
 | 项目 | 设置 |
 |---|---|
 | 模型组合 | OPT-125M / OPT-6.7B |
-| prompt | `high_acceptance_opt.jsonl` 第一条，截断到 128 tokens |
+| prompt | `high_acceptance_opt.jsonl` 第一条；通过 `/benchmark_complete` 执行时，OPT tokenizer 会自动加入 BOS，本实验使用前 127 个内容 token decode 成文本，使服务端 `prompt_token_count=128` |
 | output_tokens | `256` |
-| temperature | `0.0` |
-| gamma | `1, 2, 4, 6, 8` |
-| DSSD 单向延迟 | `0, 10, 20, 30, 40, 50 ms` |
-| DSSD 带宽 | 固定 100 Mbps；同时建议保留 unlimited 作为对照 |
+| temperature | `0.1` |
+| seed | `0` |
+| gamma | `1, 2, 4, 6, 8, 10, 12` |
+| DSSD 单向延迟 | `0, 10, 20, 30, 40 ms` |
+| DSSD 带宽 | 固定 100 Mbps |
 | target-only 网络设置 | 固定使用 0ms baseline，不参与 latency sweep |
 | repeats | `20` |
 | warmup_repeats | `2` |
@@ -360,7 +361,7 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m vllm.dssd.entrypoints
 
 ### 4.4 执行 target-only baseline 与当前 gamma 的 latency sweep
 
-终端 3 先执行 target-only 0ms baseline，然后执行当前 `GAMMA` 下的 DSSD latency sweep。完成后停止终端 1 和终端 2，修改 `GAMMA` 为 `1, 2, 4, 6, 8` 中的下一个值并重复。整理结果时，每个 latency 的 `target-only token/s` 都填该 0ms baseline，不使用带延迟的 target-only 结果。
+终端 3 先执行 target-only 0ms baseline，然后执行当前 `GAMMA` 下的 DSSD latency sweep。完成后停止终端 1 和终端 2，修改 `GAMMA` 为 `1, 2, 4, 6, 8, 10, 12` 中的下一个值并重复。整理结果时，每个 latency 的 `target-only token/s` 都填该 0ms baseline，不使用带延迟的 target-only 结果。
 
 ```bash
 export GAMMA=4
@@ -377,7 +378,9 @@ endpoint = "http://127.0.0.1:6006/benchmark_complete"
 result_dir = Path(os.environ["RESULT_DIR"])
 tokenizer = AutoTokenizer.from_pretrained(os.environ["TOKENIZER"], local_files_only=Path(os.environ["TOKENIZER"]).exists())
 source_prompt = json.loads(Path(os.environ["PROMPT_JSONL"]).read_text(encoding="utf-8").splitlines()[0])["prompt"]
-prompt_token_ids = tokenizer.encode(source_prompt, add_special_tokens=False)[:128]
+# OPT tokenizer 会在 edge server 的 tokenizer(prompt).input_ids 中加入 BOS。
+# 因此这里使用 127 个内容 token，使服务端 prompt_token_count 等于 128。
+prompt_token_ids = tokenizer.encode(source_prompt, add_special_tokens=False)[:127]
 prompt = tokenizer.decode(prompt_token_ids)
 gamma = int(os.environ["GAMMA"])
 
@@ -385,12 +388,13 @@ def run_mode(mode, *, latency_ms, bandwidth_mbps, output_name):
     records = []
     for repeat in range(22):
         payload = {
-            "req_id": f"e3-{mode}-g{gamma}-lat{latency_ms}-r{repeat}-{time.time_ns()}",
+            "req_id": f"e3-temp01-{mode}-g{gamma}-lat{latency_ms}-r{repeat}-{time.time_ns()}",
             "prompt": prompt,
             "mode": mode,
             "sampling_params": {
                 "max_tokens": 256,
-                "temperature": 0.0,
+                "temperature": 0.1,
+                "seed": 0,
                 "ignore_eos": True,
             },
             "network_simulation": {
@@ -399,12 +403,19 @@ def run_mode(mode, *, latency_ms, bandwidth_mbps, output_name):
             },
         }
         req = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=900) as resp:
             record = json.loads(resp.read().decode())
         if record["prompt_token_count"] != 128:
             raise RuntimeError(f"expected prompt_token_count=128, got {record['prompt_token_count']}")
+        if record["output_token_count"] != 256:
+            raise RuntimeError(f"expected output_token_count=256, got {record['output_token_count']}")
         record["warmup"] = repeat < 2
+        record["repeat"] = repeat
         record["gamma"] = gamma
+        record["temperature"] = 0.1
+        record["seed"] = 0
+        record["dssd_latency_ms"] = latency_ms
+        record["bandwidth_mbps"] = bandwidth_mbps
         records.append(record)
 
     out = result_dir / output_name
@@ -430,15 +441,15 @@ target_baseline = run_mode(
     "target_only",
     latency_ms=0,
     bandwidth_mbps=0,
-    output_name=f"e3-target-only-opt125m-opt67b-p128-o256-0ms-baseline.jsonl",
+    output_name=f"e3-temp01-target-only-opt125m-opt67b-p128-o256-g{gamma}-0ms-baseline.jsonl",
 )
 
-for lat in (0, 10, 20, 30, 40, 50):
+for lat in (0, 10, 20, 30, 40):
     dssd_summary = run_mode(
         "dssd",
         latency_ms=lat,
         bandwidth_mbps=100,
-        output_name=f"e3-dssd-opt125m-opt67b-p128-o256-g{gamma}-lat{lat}ms-100mbps.jsonl",
+        output_name=f"e3-temp01-dssd-opt125m-opt67b-p128-o256-g{gamma}-lat{lat}ms-100mbps.jsonl",
     )
     print(json.dumps({
         "gamma": gamma,
@@ -463,52 +474,73 @@ PY
 | 平均接受长度 | DSSD JSONL measured repeats 的平均 `avg_accepted_len_per_round` |
 | 接受率 | DSSD JSONL measured repeats 的平均 `draft_acceptance_rate` |
 | all-accept round rate | DSSD JSONL measured repeats 的平均 `all_accept_round_rate` |
+| draft round 数 | DSSD JSONL measured repeats 的平均 `total_rounds` |
 
 ### 4.6 结果记录表：100 Mbps
 
-| DSSD latency(ms) | gamma | 0ms target-only token/s | DSSD token/s | speedup vs 0ms target-only | draft acceptance | avg accepted len | 原始结果 |
-|---:|---:|---:|---:|---:|---:|---:|---|
-| 0 | 1 |  |  |  |  |  |  |
-| 0 | 2 |  |  |  |  |  |  |
-| 0 | 4 |  |  |  |  |  |  |
-| 0 | 6 |  |  |  |  |  |  |
-| 0 | 8 |  |  |  |  |  |  |
-| 10 | 1 |  |  |  |  |  |  |
-| 10 | 2 |  |  |  |  |  |  |
-| 10 | 4 |  |  |  |  |  |  |
-| 10 | 6 |  |  |  |  |  |  |
-| 10 | 8 |  |  |  |  |  |  |
-| 20 | 1 |  |  |  |  |  |  |
-| 20 | 2 |  |  |  |  |  |  |
-| 20 | 4 |  |  |  |  |  |  |
-| 20 | 6 |  |  |  |  |  |  |
-| 20 | 8 |  |  |  |  |  |  |
-| 30 | 1 |  |  |  |  |  |  |
-| 30 | 2 |  |  |  |  |  |  |
-| 30 | 4 |  |  |  |  |  |  |
-| 30 | 6 |  |  |  |  |  |  |
-| 30 | 8 |  |  |  |  |  |  |
-| 40 | 1 |  |  |  |  |  |  |
-| 40 | 2 |  |  |  |  |  |  |
-| 40 | 4 |  |  |  |  |  |  |
-| 40 | 6 |  |  |  |  |  |  |
-| 40 | 8 |  |  |  |  |  |  |
-| 50 | 1 |  |  |  |  |  |  |
-| 50 | 2 |  |  |  |  |  |  |
-| 50 | 4 |  |  |  |  |  |  |
-| 50 | 6 |  |  |  |  |  |  |
-| 50 | 8 |  |  |  |  |  |  |
+执行日期：2026-05-04 至 2026-05-05。该组实验保持 E3 的 prompt、模型、带宽、输出长度和 repeats 配置不变，将采样温度改为 `temperature=0.1`，固定 `seed=0`、`ignore_eos=True`。每个 JSONL 文件包含 22 条记录，其中前 2 条为 warmup，后 20 条用于计算均值。第一轮覆盖 `gamma=1,2,4,6,8`；补充实验继续增加 `gamma=10,12`。
+
+| DSSD latency(ms) | gamma | 0ms target-only token/s | DSSD token/s | speedup vs 0ms target-only | draft acceptance | avg accepted len | all-accept round | rounds | 原始结果 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 0 | 1 | 102.09 | 119.19 | 1.17 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat0ms-100mbps.jsonl` |
+| 10 | 1 | 102.09 | 51.89 | 0.51 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat10ms-100mbps.jsonl` |
+| 20 | 1 | 102.09 | 33.46 | 0.33 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat20ms-100mbps.jsonl` |
+| 30 | 1 | 102.09 | 24.65 | 0.24 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat30ms-100mbps.jsonl` |
+| 40 | 1 | 102.09 | 19.61 | 0.19 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat40ms-100mbps.jsonl` |
+| 0 | 2 | 101.95 | 170.88 | 1.68 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat0ms-100mbps.jsonl` |
+| 10 | 2 | 101.95 | 74.30 | 0.73 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat10ms-100mbps.jsonl` |
+| 20 | 2 | 101.95 | 48.83 | 0.48 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat20ms-100mbps.jsonl` |
+| 30 | 2 | 101.95 | 36.24 | 0.36 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat30ms-100mbps.jsonl` |
+| 40 | 2 | 101.95 | 28.84 | 0.28 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat40ms-100mbps.jsonl` |
+| 0 | 4 | 101.63 | 177.30 | 1.74 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat0ms-100mbps.jsonl` |
+| 10 | 4 | 101.63 | 92.06 | 0.91 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat10ms-100mbps.jsonl` |
+| 20 | 4 | 101.63 | 63.80 | 0.63 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat20ms-100mbps.jsonl` |
+| 30 | 4 | 101.63 | 48.70 | 0.48 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat30ms-100mbps.jsonl` |
+| 40 | 4 | 101.63 | 39.50 | 0.39 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat40ms-100mbps.jsonl` |
+| 0 | 6 | 100.30 | 182.93 | 1.82 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat0ms-100mbps.jsonl` |
+| 10 | 6 | 100.30 | 102.05 | 1.02 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat10ms-100mbps.jsonl` |
+| 20 | 6 | 100.30 | 72.67 | 0.72 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat20ms-100mbps.jsonl` |
+| 30 | 6 | 100.30 | 56.69 | 0.57 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat30ms-100mbps.jsonl` |
+| 40 | 6 | 100.30 | 46.54 | 0.46 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat40ms-100mbps.jsonl` |
+| 0 | 8 | 99.92 | 225.86 | 2.26 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat0ms-100mbps.jsonl` |
+| 10 | 8 | 99.92 | 129.83 | 1.30 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat10ms-100mbps.jsonl` |
+| 20 | 8 | 99.92 | 93.70 | 0.94 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat20ms-100mbps.jsonl` |
+| 30 | 8 | 99.92 | 73.34 | 0.73 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat30ms-100mbps.jsonl` |
+| 40 | 8 | 99.92 | 60.31 | 0.60 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat40ms-100mbps.jsonl` |
+| 0 | 10 | 99.66 | 235.02 | 2.36 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat0ms-100mbps.jsonl` |
+| 10 | 10 | 99.66 | 135.52 | 1.36 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat10ms-100mbps.jsonl` |
+| 20 | 10 | 99.66 | 98.91 | 0.99 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat20ms-100mbps.jsonl` |
+| 30 | 10 | 99.66 | 79.03 | 0.79 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat30ms-100mbps.jsonl` |
+| 40 | 10 | 99.66 | 65.47 | 0.66 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat40ms-100mbps.jsonl` |
+| 0 | 12 | 99.54 | 187.91 | 1.89 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat0ms-100mbps.jsonl` |
+| 10 | 12 | 99.54 | 115.11 | 1.16 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat10ms-100mbps.jsonl` |
+| 20 | 12 | 99.54 | 86.80 | 0.87 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat20ms-100mbps.jsonl` |
+| 30 | 12 | 99.54 | 70.22 | 0.71 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat30ms-100mbps.jsonl` |
+| 40 | 12 | 99.54 | 58.63 | 0.59 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat40ms-100mbps.jsonl` |
+
+#### 4.6.1 gamma x latency 吞吐率矩阵
+
+单元格为 DSSD token/s，带宽固定为 100 Mbps。
+
+| gamma \ DSSD latency(ms) | 0 | 10 | 20 | 30 | 40 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 119.19 | 51.89 | 33.46 | 24.65 | 19.61 |
+| 2 | 170.88 | 74.30 | 48.83 | 36.24 | 28.84 |
+| 4 | 177.30 | 92.06 | 63.80 | 48.70 | 39.50 |
+| 6 | 182.93 | 102.05 | 72.67 | 56.69 | 46.54 |
+| 8 | 225.86 | 129.83 | 93.70 | 73.34 | 60.31 |
+| 10 | 235.02 | 135.52 | 98.91 | 79.03 | 65.47 |
+| 12 | 187.91 | 115.11 | 86.80 | 70.22 | 58.63 |
 
 ### 4.7 结果记录表：每个 latency 的最优 gamma
 
 | DSSD latency(ms) | best gamma | 0ms target-only token/s | best DSSD token/s | best speedup vs 0ms target-only | draft acceptance | avg accepted len |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 |  |  |  |  |  |  |
-| 10 |  |  |  |  |  |  |
-| 20 |  |  |  |  |  |  |
-| 30 |  |  |  |  |  |  |
-| 40 |  |  |  |  |  |  |
-| 50 |  |  |  |  |  |  |
+| 0 | 10 | 99.66 | 235.02 | 2.36 | 0.755 | 7.55 |
+| 10 | 10 | 99.66 | 135.52 | 1.36 | 0.755 | 7.55 |
+| 20 | 10 | 99.66 | 98.91 | 0.99 | 0.755 | 7.55 |
+| 30 | 10 | 99.66 | 79.03 | 0.79 | 0.755 | 7.55 |
+| 40 | 10 | 99.66 | 65.47 | 0.66 | 0.755 | 7.55 |
 
 ### 4.8 论文图表规划
 
@@ -519,7 +551,7 @@ PY
 
 ### 4.9 论文中可用结论
 
-若低延迟条件下存在 `speedup > 1.0`，可说明 DSSD 在边云链路足够好、draft 接受率较高时能提升系统吞吐。若高延迟下 speedup 下降到 1 以下，可进一步说明 DSSD 收益受网络往返次数影响，需要根据链路条件选择合适 `gamma`。
+在 `temperature=0.1` 下，`gamma=10` 是本组所有 latency 中的最优配置。`gamma=10` 在 0ms、10ms 下的 speedup 分别为 2.36、1.36，20ms 时为 0.99，接近 target-only 但略低；30ms 和 40ms 时分别下降到 0.79、0.66。因此该采样配置下，收益边界位于 10ms 到 20ms 单向延迟之间。`gamma=12` 的接受率最低，为 0.573，但吞吐低于 `gamma=8` 和 `gamma=10`，说明较低接受率并不必然带来更高吞吐，仍需结合平均轮数和单轮 draft 长度选择 `gamma`。
 
 ## 5. 每次实验后的记录要求
 
@@ -563,4 +595,3 @@ PY
 | 20ms, 100 Mbps |  |  |  |  |  |
 | 30ms, 100 Mbps |  |  |  |  |  |
 | 40ms, 100 Mbps |  |  |  |  |  |
-| 50ms, 100 Mbps |  |  |  |  |  |
