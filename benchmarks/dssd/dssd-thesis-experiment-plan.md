@@ -18,6 +18,11 @@
 | Tokenizer | 使用 OPT-125M tokenizer；OPT-125M 与 OPT-6.7B 词表一致 |
 | Model runner | edge `v1`，verifier `v1` |
 | GPU 分配 | edge: GPU 0，verifier: GPU 1 |
+| 操作系统 | Ubuntu 22.04.5 LTS |
+| Python 版本 | 3.12.3 |
+| PyTorch 版本 | 2.10.0+cu128 |
+| PyTorch CUDA 构建版本 | 12.8 |
+| GPU | NVIDIA GeForce RTX 5090 x 2 |
 | prompt 文件 | `benchmarks/dssd/prompts/high_acceptance_opt.jsonl` |
 | prompt 选择 | 默认使用前 5 条做正确性实验；性能实验使用第一条并截断 |
 | prompt_len | 128 |
@@ -290,7 +295,7 @@ PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py
 
 ### 4.1 实验目的
 
-评估 DSSD 在非贪心采样条件下，不同 draft 长度和 edge-verifier 网络延迟对吞吐的影响，找出 DSSD 超过 target-only 的网络条件和最佳 `gamma` 区间。这里的网络延迟只作用于 DSSD 的 edge-verifier 通信；target-only 表示 target 模型单独推理，不存在 DSSD 的多轮 edge-verifier 交互，因此所有 speedup 都使用 0ms target-only 基线计算。
+评估 DSSD 在非贪心采样条件下，不同 draft 长度和 edge-verifier 网络延迟对吞吐的影响，找出 DSSD 超过 target-only 的网络条件和最佳 `gamma` 区间。这里的网络延迟只作用于 DSSD 的 edge-verifier 通信；target-only 表示 target 模型单独推理，不存在 DSSD 的多轮 edge-verifier 交互，也不受 DSSD `gamma` 参数影响。因此所有 speedup 都使用统一的 0ms target-only 基线计算。
 
 ### 4.2 实验配置
 
@@ -318,9 +323,9 @@ PYTHONPATH=$PWD .venv/bin/python experiments/dssd_correctness/compare_outputs.py
 
 ### 4.3 启动服务
 
-E3 使用 edge server 的 `/benchmark_complete` 接口测量 DSSD 和 target-only。DSSD 请求使用待评估的网络模拟参数；target-only 请求只用于获得 0ms baseline，后续所有 latency 下的 speedup 都复用该 baseline。
+E3 使用 edge server 的 `/benchmark_complete` 接口测量 DSSD 和 target-only。DSSD 请求使用待评估的网络模拟参数；target-only 请求只用于获得统一的 0ms baseline，后续所有 latency 和 `gamma` 下的 speedup 都复用该 baseline。
 
-每个 DSSD `gamma` 单独启动一组 verifier/edge server，完成全部 latency 扫描后再切换下一个 `gamma`。target-only baseline 不依赖 draft token，但为了减少环境差异，可在同一服务启动后先测一次。
+每个 DSSD `gamma` 单独启动一组 verifier/edge server，完成全部 latency 扫描后再切换下一个 `gamma`。target-only baseline 不依赖 draft token 和 `gamma`，实验执行中在不同服务启动轮次下重复测量 target-only，并在结果整理时将这些重复测量合并为一个统一 baseline。
 
 终端 1 启动 verifier。下面以 `GAMMA=4` 为例：
 
@@ -361,7 +366,7 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m vllm.dssd.entrypoints
 
 ### 4.4 执行 target-only baseline 与当前 gamma 的 latency sweep
 
-终端 3 先执行 target-only 0ms baseline，然后执行当前 `GAMMA` 下的 DSSD latency sweep。完成后停止终端 1 和终端 2，修改 `GAMMA` 为 `1, 2, 4, 6, 8, 10, 12` 中的下一个值并重复。整理结果时，每个 latency 的 `target-only token/s` 都填该 0ms baseline，不使用带延迟的 target-only 结果。
+终端 3 先执行 target-only 0ms baseline，然后执行当前 `GAMMA` 下的 DSSD latency sweep。完成后停止终端 1 和终端 2，修改 `GAMMA` 为 `1, 2, 4, 6, 8, 10, 12` 中的下一个值并重复。整理结果时，多个 target-only JSONL 只作为同一 0ms baseline 的重复测量来源，最终表格统一填合并后的 target-only 均值，不为不同 `gamma` 单独设置 target-only 基线。
 
 ```bash
 export GAMMA=4
@@ -451,12 +456,14 @@ for lat in (0, 10, 20, 30, 40):
         bandwidth_mbps=100,
         output_name=f"e3-temp01-dssd-opt125m-opt67b-p128-o256-g{gamma}-lat{lat}ms-100mbps.jsonl",
     )
+    # 这里输出的是当前服务启动轮次下的临时对照值；最终论文表格统一使用全部
+    # target-only measured repeats 合并后的 0ms baseline 重新计算 speedup。
     print(json.dumps({
         "gamma": gamma,
         "dssd_latency_ms": lat,
-        "target_only_baseline_tokens_per_s": target_baseline["mean_tokens_per_s"],
+        "target_only_current_run_tokens_per_s": target_baseline["mean_tokens_per_s"],
         "dssd_tokens_per_s": dssd_summary["mean_tokens_per_s"],
-        "speedup_vs_0ms_target_only": (
+        "temporary_speedup_vs_current_run_target_only": (
             dssd_summary["mean_tokens_per_s"]
             / target_baseline["mean_tokens_per_s"]
         ),
@@ -469,8 +476,8 @@ PY
 | 指标 | 来源 |
 |---|---|
 | DSSD tokens/s | DSSD JSONL measured repeats 的平均 `output_token_count / server_inference_seconds` |
-| target-only tokens/s | 0ms target-only baseline JSONL 中 measured repeats 的平均 `output_token_count / server_inference_seconds` |
-| speedup | `DSSD tokens/s / 0ms target-only tokens/s` |
+| target-only tokens/s | 全部 0ms target-only baseline JSONL 的 measured repeats 合并后的平均 `output_token_count / server_inference_seconds` |
+| speedup | `DSSD tokens/s / 统一 0ms target-only tokens/s` |
 | 平均接受长度 | DSSD JSONL measured repeats 的平均 `avg_accepted_len_per_round` |
 | 接受率 | DSSD JSONL measured repeats 的平均 `draft_acceptance_rate` |
 | all-accept round rate | DSSD JSONL measured repeats 的平均 `all_accept_round_rate` |
@@ -480,45 +487,45 @@ PY
 
 执行日期：2026-05-04 至 2026-05-05。该组实验保持 E3 的 prompt、模型、带宽、输出长度和 repeats 配置不变，将采样温度改为 `temperature=0.1`，固定 `seed=0`、`ignore_eos=True`。每个 JSONL 文件包含 22 条记录，其中前 2 条为 warmup，后 20 条用于计算均值。第一轮覆盖 `gamma=1,2,4,6,8`；补充实验继续增加 `gamma=10,12`。
 
-0ms target-only baseline 原始结果：`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g1-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g2-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g4-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g6-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g8-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g10-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g12-0ms-baseline.jsonl`。
+0ms target-only baseline 原始结果：`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g1-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g2-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g4-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g6-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g8-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g10-0ms-baseline.jsonl`、`benchmarks/dssd/results/e3-temp01-target-only-opt125m-opt67b-p128-o256-g12-0ms-baseline.jsonl`。这些文件不是不同 `gamma` 下的 target-only 对照，而是同一 0ms target-only 基线在不同实验启动轮次下的重复测量；去除 warmup 后合并得到统一 baseline 为 100.73 token/s。
 
 | DSSD latency(ms) | gamma | 0ms target-only token/s | DSSD token/s | speedup vs 0ms target-only | draft acceptance | avg accepted len | all-accept round | rounds | 原始结果 |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 0 | 1 | 102.09 | 119.19 | 1.17 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat0ms-100mbps.jsonl` |
-| 10 | 1 | 102.09 | 51.89 | 0.51 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat10ms-100mbps.jsonl` |
-| 20 | 1 | 102.09 | 33.46 | 0.33 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat20ms-100mbps.jsonl` |
-| 30 | 1 | 102.09 | 24.65 | 0.24 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat30ms-100mbps.jsonl` |
-| 40 | 1 | 102.09 | 19.61 | 0.19 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat40ms-100mbps.jsonl` |
-| 0 | 2 | 101.95 | 170.88 | 1.68 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat0ms-100mbps.jsonl` |
-| 10 | 2 | 101.95 | 74.30 | 0.73 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat10ms-100mbps.jsonl` |
-| 20 | 2 | 101.95 | 48.83 | 0.48 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat20ms-100mbps.jsonl` |
-| 30 | 2 | 101.95 | 36.24 | 0.36 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat30ms-100mbps.jsonl` |
-| 40 | 2 | 101.95 | 28.84 | 0.28 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat40ms-100mbps.jsonl` |
-| 0 | 4 | 101.63 | 177.30 | 1.74 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat0ms-100mbps.jsonl` |
-| 10 | 4 | 101.63 | 92.06 | 0.91 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat10ms-100mbps.jsonl` |
-| 20 | 4 | 101.63 | 63.80 | 0.63 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat20ms-100mbps.jsonl` |
-| 30 | 4 | 101.63 | 48.70 | 0.48 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat30ms-100mbps.jsonl` |
-| 40 | 4 | 101.63 | 39.50 | 0.39 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat40ms-100mbps.jsonl` |
-| 0 | 6 | 100.30 | 182.93 | 1.82 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat0ms-100mbps.jsonl` |
-| 10 | 6 | 100.30 | 102.05 | 1.02 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat10ms-100mbps.jsonl` |
-| 20 | 6 | 100.30 | 72.67 | 0.72 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat20ms-100mbps.jsonl` |
-| 30 | 6 | 100.30 | 56.69 | 0.57 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat30ms-100mbps.jsonl` |
-| 40 | 6 | 100.30 | 46.54 | 0.46 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat40ms-100mbps.jsonl` |
-| 0 | 8 | 99.92 | 225.86 | 2.26 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat0ms-100mbps.jsonl` |
-| 10 | 8 | 99.92 | 129.83 | 1.30 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat10ms-100mbps.jsonl` |
-| 20 | 8 | 99.92 | 93.70 | 0.94 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat20ms-100mbps.jsonl` |
-| 30 | 8 | 99.92 | 73.34 | 0.73 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat30ms-100mbps.jsonl` |
-| 40 | 8 | 99.92 | 60.31 | 0.60 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat40ms-100mbps.jsonl` |
-| 0 | 10 | 99.66 | 235.02 | 2.36 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat0ms-100mbps.jsonl` |
-| 10 | 10 | 99.66 | 135.52 | 1.36 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat10ms-100mbps.jsonl` |
-| 20 | 10 | 99.66 | 98.91 | 0.99 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat20ms-100mbps.jsonl` |
-| 30 | 10 | 99.66 | 79.03 | 0.79 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat30ms-100mbps.jsonl` |
-| 40 | 10 | 99.66 | 65.47 | 0.66 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat40ms-100mbps.jsonl` |
-| 0 | 12 | 99.54 | 187.91 | 1.89 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat0ms-100mbps.jsonl` |
-| 10 | 12 | 99.54 | 115.11 | 1.16 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat10ms-100mbps.jsonl` |
-| 20 | 12 | 99.54 | 86.80 | 0.87 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat20ms-100mbps.jsonl` |
-| 30 | 12 | 99.54 | 70.22 | 0.71 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat30ms-100mbps.jsonl` |
-| 40 | 12 | 99.54 | 58.63 | 0.59 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat40ms-100mbps.jsonl` |
+| 0 | 1 | 100.73 | 119.19 | 1.18 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat0ms-100mbps.jsonl` |
+| 10 | 1 | 100.73 | 51.89 | 0.52 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat10ms-100mbps.jsonl` |
+| 20 | 1 | 100.73 | 33.46 | 0.33 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat20ms-100mbps.jsonl` |
+| 30 | 1 | 100.73 | 24.65 | 0.24 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat30ms-100mbps.jsonl` |
+| 40 | 1 | 100.73 | 19.61 | 0.19 | 0.947 | 0.95 | 0.947 | 131.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g1-lat40ms-100mbps.jsonl` |
+| 0 | 2 | 100.73 | 170.88 | 1.70 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat0ms-100mbps.jsonl` |
+| 10 | 2 | 100.73 | 74.30 | 0.74 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat10ms-100mbps.jsonl` |
+| 20 | 2 | 100.73 | 48.83 | 0.48 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat20ms-100mbps.jsonl` |
+| 30 | 2 | 100.73 | 36.24 | 0.36 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat30ms-100mbps.jsonl` |
+| 40 | 2 | 100.73 | 28.84 | 0.29 | 0.966 | 1.93 | 0.954 | 87.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g2-lat40ms-100mbps.jsonl` |
+| 0 | 4 | 100.73 | 177.30 | 1.76 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat0ms-100mbps.jsonl` |
+| 10 | 4 | 100.73 | 92.06 | 0.91 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat10ms-100mbps.jsonl` |
+| 20 | 4 | 100.73 | 63.80 | 0.63 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat20ms-100mbps.jsonl` |
+| 30 | 4 | 100.73 | 48.70 | 0.48 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat30ms-100mbps.jsonl` |
+| 40 | 4 | 100.73 | 39.50 | 0.39 | 0.843 | 3.37 | 0.797 | 59.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g4-lat40ms-100mbps.jsonl` |
+| 0 | 6 | 100.73 | 182.93 | 1.82 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat0ms-100mbps.jsonl` |
+| 10 | 6 | 100.73 | 102.05 | 1.01 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat10ms-100mbps.jsonl` |
+| 20 | 6 | 100.73 | 72.67 | 0.72 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat20ms-100mbps.jsonl` |
+| 30 | 6 | 100.73 | 56.69 | 0.56 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat30ms-100mbps.jsonl` |
+| 40 | 6 | 100.73 | 46.54 | 0.46 | 0.748 | 4.49 | 0.660 | 47.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g6-lat40ms-100mbps.jsonl` |
+| 0 | 8 | 100.73 | 225.86 | 2.24 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat0ms-100mbps.jsonl` |
+| 10 | 8 | 100.73 | 129.83 | 1.29 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat10ms-100mbps.jsonl` |
+| 20 | 8 | 100.73 | 93.70 | 0.93 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat20ms-100mbps.jsonl` |
+| 30 | 8 | 100.73 | 73.34 | 0.73 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat30ms-100mbps.jsonl` |
+| 40 | 8 | 100.73 | 60.31 | 0.60 | 0.796 | 6.37 | 0.714 | 35.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g8-lat40ms-100mbps.jsonl` |
+| 0 | 10 | 100.73 | 235.02 | 2.33 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat0ms-100mbps.jsonl` |
+| 10 | 10 | 100.73 | 135.52 | 1.35 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat10ms-100mbps.jsonl` |
+| 20 | 10 | 100.73 | 98.91 | 0.98 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat20ms-100mbps.jsonl` |
+| 30 | 10 | 100.73 | 79.03 | 0.78 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat30ms-100mbps.jsonl` |
+| 40 | 10 | 100.73 | 65.47 | 0.65 | 0.755 | 7.55 | 0.677 | 31.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g10-lat40ms-100mbps.jsonl` |
+| 0 | 12 | 100.73 | 187.91 | 1.87 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat0ms-100mbps.jsonl` |
+| 10 | 12 | 100.73 | 115.11 | 1.14 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat10ms-100mbps.jsonl` |
+| 20 | 12 | 100.73 | 86.80 | 0.86 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat20ms-100mbps.jsonl` |
+| 30 | 12 | 100.73 | 70.22 | 0.70 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat30ms-100mbps.jsonl` |
+| 40 | 12 | 100.73 | 58.63 | 0.58 | 0.573 | 6.88 | 0.515 | 33.0 | `benchmarks/dssd/results/e3-temp01-dssd-opt125m-opt67b-p128-o256-g12-lat40ms-100mbps.jsonl` |
 
 #### 4.6.1 gamma x latency 吞吐率矩阵
 
@@ -534,15 +541,65 @@ PY
 | 10 | 235.02 | 135.52 | 98.91 | 79.03 | 65.47 |
 | 12 | 187.91 | 115.11 | 86.80 | 70.22 | 58.63 |
 
+#### 4.6.2 DSSD 吞吐率波动统计
+
+下表由 4.6 中各 DSSD 原始 JSONL 文件计算得到，统计对象为去除前 2 次 warmup 后的 20 次 measured repeats；吞吐率单位为 token/s。
+
+| DSSD latency(ms) | gamma | n | mean | std | min | max |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1 | 20 | 119.19 | 7.16 | 112.85 | 134.82 |
+| 10 | 1 | 20 | 51.89 | 0.62 | 51.19 | 54.06 |
+| 20 | 1 | 20 | 33.46 | 0.13 | 33.21 | 33.72 |
+| 30 | 1 | 20 | 24.65 | 0.06 | 24.53 | 24.76 |
+| 40 | 1 | 20 | 19.61 | 0.05 | 19.52 | 19.71 |
+| 0 | 2 | 20 | 170.88 | 11.91 | 151.95 | 189.31 |
+| 10 | 2 | 20 | 74.30 | 1.51 | 73.05 | 80.22 |
+| 20 | 2 | 20 | 48.83 | 0.61 | 48.19 | 50.53 |
+| 30 | 2 | 20 | 36.24 | 0.30 | 35.80 | 37.27 |
+| 40 | 2 | 20 | 28.84 | 0.13 | 28.66 | 29.22 |
+| 0 | 4 | 20 | 177.30 | 11.21 | 163.72 | 210.99 |
+| 10 | 4 | 20 | 92.06 | 0.83 | 90.53 | 93.72 |
+| 20 | 4 | 20 | 63.80 | 0.44 | 63.18 | 64.78 |
+| 30 | 4 | 20 | 48.70 | 0.13 | 48.40 | 48.88 |
+| 40 | 4 | 20 | 39.50 | 0.16 | 39.22 | 39.96 |
+| 0 | 6 | 20 | 182.93 | 16.88 | 164.65 | 225.33 |
+| 10 | 6 | 20 | 102.05 | 0.80 | 100.53 | 103.89 |
+| 20 | 6 | 20 | 72.67 | 0.39 | 71.81 | 73.23 |
+| 30 | 6 | 20 | 56.69 | 0.19 | 56.31 | 56.99 |
+| 40 | 6 | 20 | 46.54 | 0.29 | 46.23 | 47.60 |
+| 0 | 8 | 20 | 225.86 | 7.70 | 212.49 | 249.68 |
+| 10 | 8 | 20 | 129.83 | 1.31 | 126.62 | 132.41 |
+| 20 | 8 | 20 | 93.70 | 1.42 | 91.66 | 97.99 |
+| 30 | 8 | 20 | 73.34 | 0.54 | 72.75 | 75.35 |
+| 40 | 8 | 20 | 60.31 | 0.18 | 59.87 | 60.57 |
+| 0 | 10 | 20 | 235.02 | 14.37 | 210.88 | 275.73 |
+| 10 | 10 | 20 | 135.52 | 2.79 | 130.81 | 142.43 |
+| 20 | 10 | 20 | 98.91 | 1.41 | 96.53 | 102.54 |
+| 30 | 10 | 20 | 79.03 | 2.16 | 77.10 | 87.32 |
+| 40 | 10 | 20 | 65.47 | 0.94 | 64.58 | 68.41 |
+| 0 | 12 | 20 | 187.91 | 4.95 | 182.16 | 201.54 |
+| 10 | 12 | 20 | 115.11 | 0.68 | 112.85 | 116.22 |
+| 20 | 12 | 20 | 86.80 | 0.67 | 85.92 | 88.13 |
+| 30 | 12 | 20 | 70.22 | 0.66 | 69.37 | 72.46 |
+| 40 | 12 | 20 | 58.63 | 0.35 | 57.92 | 59.08 |
+
+#### 4.6.3 统一 target-only baseline 吞吐率波动统计
+
+下表由 4.6 中全部 target-only baseline JSONL 文件合并计算得到。target-only 不使用 draft token，也不受 DSSD `gamma` 和 edge-verifier 网络延迟影响，因此论文图表和 speedup 计算均使用这一统一基线。
+
+| baseline | n | mean | std | min | max |
+|---|---:|---:|---:|---:|---:|
+| target-only, 0ms | 140 | 100.73 | 1.08 | 99.00 | 102.64 |
+
 ### 4.7 结果记录表：每个 latency 的最优 gamma
 
 | DSSD latency(ms) | best gamma | 0ms target-only token/s | best DSSD token/s | best speedup vs 0ms target-only | draft acceptance | avg accepted len |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 10 | 99.66 | 235.02 | 2.36 | 0.755 | 7.55 |
-| 10 | 10 | 99.66 | 135.52 | 1.36 | 0.755 | 7.55 |
-| 20 | 10 | 99.66 | 98.91 | 0.99 | 0.755 | 7.55 |
-| 30 | 10 | 99.66 | 79.03 | 0.79 | 0.755 | 7.55 |
-| 40 | 10 | 99.66 | 65.47 | 0.66 | 0.755 | 7.55 |
+| 0 | 10 | 100.73 | 235.02 | 2.33 | 0.755 | 7.55 |
+| 10 | 10 | 100.73 | 135.52 | 1.35 | 0.755 | 7.55 |
+| 20 | 10 | 100.73 | 98.91 | 0.98 | 0.755 | 7.55 |
+| 30 | 10 | 100.73 | 79.03 | 0.78 | 0.755 | 7.55 |
+| 40 | 10 | 100.73 | 65.47 | 0.65 | 0.755 | 7.55 |
 
 ### 4.8 论文图表规划
 
@@ -553,7 +610,7 @@ PY
 
 ### 4.9 论文中可用结论
 
-在 `temperature=0.1` 下，`gamma=10` 是本组所有 latency 中的最优配置。`gamma=10` 在 0ms、10ms 下的 speedup 分别为 2.36、1.36，20ms 时为 0.99，接近 target-only 但略低；30ms 和 40ms 时分别下降到 0.79、0.66。因此该采样配置下，收益边界位于 10ms 到 20ms 单向延迟之间。`gamma=12` 的接受率最低，为 0.573，但吞吐低于 `gamma=8` 和 `gamma=10`，说明较低接受率并不必然带来更高吞吐，仍需结合平均轮数和单轮 draft 长度选择 `gamma`。
+在 `temperature=0.1` 下，`gamma=10` 是本组所有 latency 中的最优配置。使用统一 0ms target-only baseline 后，`gamma=10` 在 0ms、10ms 下的 speedup 分别为 2.33、1.35，20ms 时为 0.98，接近 target-only 但略低；30ms 和 40ms 时分别下降到 0.78、0.65。因此该采样配置下，收益边界位于 10ms 到 20ms 单向延迟之间。需要注意的是，20ms 边界点的 DSSD 吞吐率为 98.91 ± 1.41 token/s，对应统一 target-only baseline 为 100.73 ± 1.08 token/s，二者处于接近持平的边界区域，论文中应将该点表述为接近 target-only 而非稳定超过。`gamma=12` 的接受率最低，为 0.573，但吞吐低于 `gamma=8` 和 `gamma=10`，说明较低接受率并不必然带来更高吞吐，仍需结合平均轮数和单轮 draft 长度选择 `gamma`。
 
 ## 5. 每次实验后的记录要求
 
